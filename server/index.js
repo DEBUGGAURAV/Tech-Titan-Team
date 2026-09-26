@@ -26,7 +26,10 @@ const firebaseApp = getApps().length ? getApps()[0] : initializeApp({
 const db = getFirestore(firebaseApp)
 const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean))
 
-const allowedClientOrigins = new Set((process.env.CLIENT_URL || 'http://localhost:5173').split(',').map((origin) => origin.trim()).filter(Boolean))
+const allowedClientOrigins = new Set([
+  ...(process.env.CLIENT_URL || 'http://localhost:5173').split(',').map((origin) => origin.trim()).filter(Boolean),
+  'https://notessharingroup.onrender.com',
+])
 app.use(cors({
   origin(origin, callback) {
     const isLocalOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin || '')
