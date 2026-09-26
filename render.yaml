@@ -10,7 +10,7 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: CLIENT_URL
-        value: https://techtitan-ui.onrender.com
+        value: https://notes-sharing-group.onrender.com
       - key: FIREBASE_PROJECT_ID
         sync: false
       - key: FIREBASE_CLIENT_EMAIL
@@ -33,7 +33,7 @@ services:
         sync: false
 
   - type: web
-    name: techtitan-ui
+    name: notes-sharing-group
     runtime: static
     buildCommand: npm ci && npm run build --workspace client
     staticPublishPath: client/dist
