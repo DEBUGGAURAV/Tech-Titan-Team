@@ -33,7 +33,7 @@ services:
         sync: false
 
   - type: web
-    name: notessharingroup
+    name: notessharinggroup
     runtime: static
     buildCommand: npm ci && npm run build --workspace client
     staticPublishPath: client/dist
