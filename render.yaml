@@ -10,7 +10,7 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: CLIENT_URL
-        value: https://notes-sharing-group.onrender.com
+        value: https://notessharingroup.onrender.com
       - key: FIREBASE_PROJECT_ID
         sync: false
       - key: FIREBASE_CLIENT_EMAIL
@@ -33,7 +33,7 @@ services:
         sync: false
 
   - type: web
-    name: notes-sharing-group
+    name: notessharingroup
     runtime: static
     buildCommand: npm ci && npm run build --workspace client
     staticPublishPath: client/dist
