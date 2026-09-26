@@ -388,18 +388,20 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
 }
 
 function ContentAdminManager({ users, onSetRole }) {
-  const eligibleUsers = users.filter((user) => user.role !== 'admin')
+  const [userFilter, setUserFilter] = useState('')
+  const eligibleUsers = users.filter((user) => user.role !== 'admin' && userMatchesQuery(user, userFilter))
   return <section className="page-width app-page">
     <div className="admin-panel">
       <div className="panel-title"><span>Note manager access</span><ShieldCheck size={17} /></div>
       <p className="panel-help">Grant note upload and editing access without user, folder, or export controls.</p>
+      <div className="search-box"><Search size={17} /><input type="search" value={userFilter} onChange={(event) => setUserFilter(event.target.value)} placeholder="Find user by name, email, college, year, branch, or role" /></div>
       {eligibleUsers.map((user) => <div className="manage-row" key={user.id}>
         <span><b>{user.name || 'Unnamed user'}</b><small>{user.email} · {user.role}</small></span>
         <button className="button compact-button" disabled={user.blocked} onClick={() => onSetRole(user.id, user.role === 'content_admin' ? 'student' : 'content_admin')}>
           {user.role === 'content_admin' ? 'Remove access' : 'Grant access'}
         </button>
       </div>)}
-      {eligibleUsers.length === 0 && <div className="empty-state">No student accounts are available.</div>}
+      {eligibleUsers.length === 0 && <div className="empty-state">No users match this search.</div>}
     </div>
   </section>
 }
