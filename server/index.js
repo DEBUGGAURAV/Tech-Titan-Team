@@ -229,6 +229,24 @@ app.post('/api/auth/signin', async (req, res) => {
   res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, college: user.college || '', year: user.year || '', branch: user.branch || '', role: user.role, blocked: false } })
 })
 
+app.post('/api/auth/change-password', authRequired, async (req, res) => {
+  const { currentPassword, newPassword } = req.body
+  if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+    return res.status(400).json({ message: 'Enter your current password and a new password of at least 8 characters.' })
+  }
+  const userRef = db.collection('users').doc(req.user.id)
+  const userSnapshot = await userRef.get()
+  const user = userSnapshot.data()
+  if (!user || !(await bcrypt.compare(currentPassword, user.passwordHash || ''))) {
+    return res.status(401).json({ message: 'Current password is incorrect.' })
+  }
+  if (await bcrypt.compare(newPassword, user.passwordHash || '')) {
+    return res.status(400).json({ message: 'Choose a password different from your current password.' })
+  }
+  await userRef.update({ passwordHash: await bcrypt.hash(newPassword, 12) })
+  res.json({ message: 'Password changed successfully.' })
+})
+
 app.post('/api/auth/signup', async (req, res) => {
   res.status(400).json({ message: 'Email verification is required. Request a signup code and verify it to create an account.' })
 })
@@ -292,8 +310,13 @@ const ensureAdmin = async () => {
   if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) return
   const email = process.env.ADMIN_EMAIL.toLowerCase().trim()
   const userRef = db.collection('users').doc(Buffer.from(email).toString('base64url'))
-  const passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12)
-  await userRef.set({ email, name: process.env.ADMIN_NAME || 'Tech Titan Admin', passwordHash, role: 'admin', blocked: false, college: '', year: '', branch: '', createdAt: FieldValue.serverTimestamp() }, { merge: true })
+  const existingUser = await userRef.get()
+  if (existingUser.exists) {
+    await userRef.set({ email, role: 'admin', blocked: false }, { merge: true })
+  } else {
+    const passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12)
+    await userRef.set({ email, name: process.env.ADMIN_NAME || 'Tech Titan Admin', passwordHash, role: 'admin', blocked: false, college: '', year: '', branch: '', createdAt: FieldValue.serverTimestamp() })
+  }
   console.log(`Admin account ready for ${email}`)
 }
 

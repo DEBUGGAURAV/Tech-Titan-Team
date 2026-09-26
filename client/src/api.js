@@ -15,6 +15,7 @@ export const signUp = (email, password, name, college, year, branch) => request(
 export const verifySignupCode = (email, code, password, name, college, year, branch) => request('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email, code, password, name, college, year, branch }) })
 export const updateProfile = (profile, token) => request('/me', { method: 'PATCH', body: JSON.stringify(profile) }, token)
 export const signIn = (email, password) => request('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password }) })
+export const changePassword = (currentPassword, newPassword, token) => request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }, token)
 export const forgotPassword = (email) => request('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) })
 export const resetPassword = (token, password) => request('/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, password }) })
 export const getNotes = (token) => request('/notes', {}, token)

@@ -4,7 +4,7 @@ import {
   GraduationCap, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Pencil, Plus,
   Search, Settings2, ShieldCheck, Sparkles, UploadCloud, Users, X, Zap,
 } from 'lucide-react'
-import { createFolder, createNote, deleteAdminUser, deleteFolder, deleteNote, forgotPassword, getAdminNotes, getAdminUsers, getExportUrl, getFolders, getNotes, requestSignupCode, resetPassword, setUserBlocked, setUserRole, signIn, signUp, updateFolder, updateNote, updateProfile, verifySignupCode } from './api'
+import { changePassword, createFolder, createNote, deleteAdminUser, deleteFolder, deleteNote, forgotPassword, getAdminNotes, getAdminUsers, getExportUrl, getFolders, getNotes, requestSignupCode, resetPassword, setUserBlocked, setUserRole, signIn, signUp, updateFolder, updateNote, updateProfile, verifySignupCode } from './api'
 
 const years = ['1st year', '2nd year', '3rd year', '4th year']
 const subjects = ['Data Structures', 'Database Systems', 'Operating Systems', 'Web Development']
@@ -275,6 +275,12 @@ function ProfileView({ user, onSave, onBack }) {
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [passwordMessage, setPasswordMessage] = useState('')
+  const [passwordError, setPasswordError] = useState('')
+  const [changingPassword, setChangingPassword] = useState(false)
 
   const updateField = (field) => (event) => setProfile((current) => ({ ...current, [field]: event.target.value }))
   const submit = async (event) => {
@@ -286,6 +292,21 @@ function ProfileView({ user, onSave, onBack }) {
     setSaving(true)
     setError('')
     try { await onSave(profile) } catch (saveError) { setError(saveError.message) } finally { setSaving(false) }
+  }
+  const submitPasswordChange = async (event) => {
+    event.preventDefault()
+    setPasswordError('')
+    setPasswordMessage('')
+    if (newPassword.length < 8) { setPasswordError('Use at least 8 characters for the new password.'); return }
+    if (newPassword !== confirmPassword) { setPasswordError('The new passwords do not match.'); return }
+    setChangingPassword(true)
+    try {
+      await changePassword(currentPassword, newPassword, JSON.parse(localStorage.getItem('tech-titan-session') || 'null')?.token)
+      setCurrentPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+      setPasswordMessage('Password changed successfully.')
+    } catch (changeError) { setPasswordError(changeError.message) } finally { setChangingPassword(false) }
   }
 
   return <section className="page-width app-page profile-page">
@@ -306,6 +327,15 @@ function ProfileView({ user, onSave, onBack }) {
         </div>
         {error && <p className="form-error">{error}</p>}
         <button className="button button-dark" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save changes'} <Check size={16} /></button>
+      </form>
+      <form className="profile-panel" onSubmit={submitPasswordChange}>
+        <div className="panel-title"><span>Change password</span><LockKeyhole size={17} /></div>
+        <label>Current password<input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label>
+        <label>New password<input type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={8} required /></label>
+        <label>Confirm new password<input type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={8} required /></label>
+        {passwordError && <p className="form-error">{passwordError}</p>}
+        {passwordMessage && <p className="form-success">{passwordMessage}</p>}
+        <button className="button button-dark" type="submit" disabled={changingPassword}>{changingPassword ? 'Updating…' : 'Change password'} <Check size={16} /></button>
       </form>
     </div>
   </section>
