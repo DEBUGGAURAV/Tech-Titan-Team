@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react'
 import {
   ArrowUpRight, BookOpen, Check, ChevronDown, Clock3, Download, FileText,
-  GraduationCap, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Pencil, Plus,
+  GraduationCap, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Pencil, Plus, Trash2,
   Search, Settings2, ShieldCheck, Sparkles, UploadCloud, Users, X, Zap,
 } from 'lucide-react'
 import {
   changePassword, createFolder, createNote, createNotice, deleteAdminUser,
-  deleteAllAdminUsers, deleteFolder, deleteNote, decideAdminRoleRequest,
+  deleteAllAdminUsers, deleteFolder, deleteNote, deleteNotice, decideAdminRoleRequest,
   forgotPassword, getAdminNotes, getAdminRoleRequests, getAdminUserDetails,
   getAdminUsers, getFolders, getNotices,
   getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword,
@@ -310,6 +310,15 @@ function App() {
     }
   }
 
+  const handleDeleteNotice = async (id) => {
+    if (!window.confirm('Delete this notice from the board?')) return
+    try {
+      await deleteNotice(id, session.token)
+      setNoticeBoard((notices) => notices.filter((item) => item.id !== id))
+      setNotice('Notice deleted from the board.')
+    } catch (error) { setNotice(error.message) }
+  }
+
   const handleExportUsers = async () => {
     try {
       await downloadAdminExport(session.token)
@@ -353,7 +362,7 @@ function App() {
         <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
         <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 8)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
         <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
-        {signedIn && <NoticeBoard notices={noticeBoard} canManage={canManageContent || isAdmin} onCreateNotice={handleCreateNotice} />}
+        {signedIn && <NoticeBoard notices={noticeBoard} canManage={canManageContent || isAdmin} onCreateNotice={handleCreateNotice} onDeleteNotice={handleDeleteNotice} />}
         {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} roleRequests={adminRoleRequests} canApproveAdminRequests={canApproveAdminRequests} onRoleRequestDecision={handleAdminRoleRequestDecision} onExport={handleExportUsers} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onDeleteAll={handleDeleteAllUsers} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
         {isAdmin && <ContentAdminManager users={adminUsers} canApproveAdminRequests={canApproveAdminRequests} onSavePermissions={handleSetContentPermissions} />}
         {canManageContent && !isAdmin && <div id="admin"><ContentAdminView folders={folders} notes={adminNotes} permissions={session.user.permissions || {}} onCreateNote={handleAdminNote} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onNoteStatus={handleNoteStatus} /></div>}
@@ -559,7 +568,7 @@ function LegacyAdminView({ users, notes, folders, onCreateFolder, onCreateNote, 
   </section>
 }
 
-function NoticeBoard({ notices, canManage, onCreateNotice }) {
+function NoticeBoard({ notices, canManage, onCreateNotice, onDeleteNotice }) {
   const [draft, setDraft] = useState({ title: '', message: '' })
   const submit = async (event) => {
     event.preventDefault()
@@ -581,7 +590,7 @@ function NoticeBoard({ notices, canManage, onCreateNotice }) {
     <div className="notice-board-list">
       {notices.length ? notices.map((notice, index) => <article className={`notice-card notice-card-${notice.type || 'general'}`} key={notice.id}>
         <span className="notice-card-index">{String(index + 1).padStart(2, '0')}</span>
-        <div className="notice-card-top"><span className="review-pill">{notice.type || 'general'}</span><small>{notice.createdAt ? new Date(notice.createdAt).toLocaleDateString() : 'Recent'}</small></div>
+        <div className="notice-card-top"><span className="review-pill">{notice.type || 'general'}</span><div className="notice-card-actions"><small>{notice.createdAt ? new Date(notice.createdAt).toLocaleDateString() : 'Recent'}</small>{canManage && <button className="notice-delete-button" type="button" aria-label={`Delete notice: ${notice.title}`} title="Delete notice" onClick={() => onDeleteNotice(notice.id)}><Trash2 size={15} /></button>}</div></div>
         <h3>{notice.title}</h3>
         <p>{notice.message}</p>
         <small className="notice-meta">Library team · expires in {Math.max(1, Math.ceil((Number(notice.expiresAt || 0) - Date.now()) / 86400000))} day(s)</small>

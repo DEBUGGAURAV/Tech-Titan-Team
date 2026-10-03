@@ -271,6 +271,14 @@ app.post('/api/notices', authRequired, async (req, res) => {
   if (!notice) return res.status(400).json({ message: 'Notice could not be created.' })
   res.status(201).json(notice)
 })
+app.delete('/api/notices/:id', authRequired, async (req, res) => {
+  if (!canManageNoticeBoard(req.user)) return res.status(403).json({ message: 'Notice board management access required.' })
+  const noticeRef = noticeBoardCollection().doc(req.params.id)
+  const noticeSnapshot = await noticeRef.get()
+  if (!noticeSnapshot.exists) return res.status(404).json({ message: 'Notice not found.' })
+  await noticeRef.delete()
+  res.json({ id: noticeSnapshot.id, deleted: true })
+})
 app.post('/api/folders', authRequired, adminRequired, async (req, res) => {
   const { subject, year } = req.body
   if (!subject || !year) return res.status(400).json({ message: 'Subject and year are required.' })
