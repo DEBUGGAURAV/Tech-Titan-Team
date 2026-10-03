@@ -82,6 +82,23 @@ footer { display:flex; align-items:center; gap:10px; padding:28px 40px; border-t
 .list-toggle:hover { color:var(--ink); }
 .list-toggle svg { transition:transform .18s ease; }
 .list-toggle .list-toggle-open { transform:rotate(180deg); }
+.latest-uploads-panel { margin:0 0 28px; padding:22px; border-top:4px solid var(--yellow); border-bottom:1px solid var(--line); background:var(--white); }
+.latest-uploads-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:12px; }
+.latest-uploads-heading h2 { margin:8px 0 0; font:600 24px/1.1 'Space Grotesk'; }
+.latest-uploads-count { padding:7px 10px; background:var(--yellow); color:var(--ink); font:10px 'DM Mono'; text-transform:uppercase; }
+.latest-upload-alert { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:14px 0; padding:12px 14px; background:#e2efe2; color:#315b3b; }
+.latest-upload-alert strong, .latest-upload-alert small { display:block; }
+.latest-upload-alert strong { font-size:12px; }
+.latest-upload-alert small { margin-top:4px; color:#55775a; font-size:11px; }
+.latest-upload-alert button { display:grid; place-items:center; width:32px; height:32px; flex:0 0 auto; background:transparent; }
+.latest-uploads-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:20px; }
+.latest-upload-item { display:grid; grid-template-columns:30px minmax(0,1fr) 16px; align-items:center; gap:10px; min-width:0; padding:12px 2px; border-top:1px solid var(--line); color:var(--ink); text-decoration:none; }
+.latest-upload-item:hover { background:var(--paper); }
+.latest-upload-index { color:var(--muted); font:10px 'DM Mono'; }
+.latest-upload-copy { min-width:0; }
+.latest-upload-copy strong, .latest-upload-copy small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.latest-upload-copy strong { font-size:12px; font-weight:700; }
+.latest-upload-copy small { margin-top:4px; color:var(--muted); font-size:10px; }
 .user-details-modal { width:min(760px,100%); }
 .user-details-modal h2 { font-size:36px; margin:14px 0; }
 .user-detail-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:14px; }
@@ -109,4 +126,6 @@ footer { display:flex; align-items:center; gap:10px; padding:28px 40px; border-t
 	.user-detail-form { grid-template-columns:1fr; }
 	.user-activity-row { grid-template-columns:minmax(0,1fr); }
 	.activity-ip { text-align:left; }
+	.latest-uploads-panel { padding:16px; }
+	.latest-uploads-list { grid-template-columns:minmax(0,1fr); }
 }

@@ -19,7 +19,7 @@ async function request(path, options = {}, token) {
 
 export const requestSignupCode = (email) => request('/auth/request-otp', { method: 'POST', body: JSON.stringify({ email, purpose: 'signup' }) })
 export const signUp = (email, password, name, college, year, branch) => request('/auth/signup', { method: 'POST', body: JSON.stringify({ email, password, name, college, year, branch }) })
-export const verifySignupCode = (email, code, password, name, college, year, branch) => request('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email, code, password, name, college, year, branch }) })
+export const verifySignupCode = (email, code, password, name, college, year, branch, mobile) => request('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email, code, password, name, college, year, branch, mobile }) })
 export const updateProfile = (profile, token) => request('/me', { method: 'PATCH', body: JSON.stringify(profile) }, token)
 export const signIn = (email, password) => request('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password }) })
 export const changePassword = (currentPassword, newPassword, token) => request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }, token)

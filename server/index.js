@@ -26,8 +26,16 @@ const firebaseApp = getApps().length ? getApps()[0] : initializeApp({
 })
 const db = getFirestore(firebaseApp)
 const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean))
+const normalizeMobile = (value) => typeof value === 'string' ? value.trim() : ''
+const isValidMobile = (value) => {
+  const mobile = normalizeMobile(value)
+  const digitCount = (mobile.match(/\d/g) || []).length
+  return mobile.length <= 20 && /^\+?[0-9][0-9\s().-]*$/.test(mobile) && digitCount >= 7 && digitCount <= 15
+}
 const toIso = (value) => value?.toDate?.().toISOString() || (typeof value === 'string' ? value : '')
 const userActivityCollection = (userId) => db.collection('users').doc(userId).collection('activity')
+const adminActionsCollection = () => db.collection('adminActions')
+const deletedAccountsCollection = () => db.collection('deletedAccounts')
 const createActivityRecord = (event, req, details = {}) => ({
   event,
   ipAddress: req.ip || '',
@@ -35,6 +43,20 @@ const createActivityRecord = (event, req, details = {}) => ({
   ...details,
 })
 const recordUserActivity = (userId, req, event, details) => userActivityCollection(userId).add(createActivityRecord(event, req, details))
+const createAdminAction = (req, target, action, status = 'completed') => ({
+  action,
+  status,
+  actorId: req.user.id,
+  actorName: req.user.name || '',
+  actorEmail: req.user.email || '',
+  actorMobile: req.user.mobile || '',
+  targetUserId: target.id,
+  targetName: target.name || '',
+  targetEmail: target.email || '',
+  targetMobile: target.mobile || '',
+  ipAddress: req.ip || '',
+  occurredAt: FieldValue.serverTimestamp(),
+})
 const serializeUser = (snapshot) => {
   const { passwordHash, createdAt, ...user } = snapshot.data()
   return { id: snapshot.id, ...user, registeredAt: toIso(createdAt) }
@@ -182,7 +204,8 @@ app.get('/api/admin/users', authRequired, adminRequired, async (_req, res) => {
   const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
   res.json(snapshot.docs.map(serializeUser))
 })
-app.get('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
+app.get('/api/admin/users/:id', authRequired, adminRequired, async (req, res, next) => {
+  if (req.params.id === 'export') return next()
   const userSnapshot = await db.collection('users').doc(req.params.id).get()
   if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
   const activitySnapshot = await userActivityCollection(req.params.id).orderBy('eventAt', 'desc').limit(100).get()
@@ -193,12 +216,13 @@ app.get('/api/admin/users/:id', authRequired, adminRequired, async (req, res) =>
   res.json({ user: serializeUser(userSnapshot), activity })
 })
 app.patch('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
-  const { name, college, year, branch } = req.body || {}
-  if (![name, college, year, branch].every((value) => typeof value === 'string' && value.trim())) {
-    return res.status(400).json({ message: 'Name, college, year, and branch are required.' })
+  const { name, mobile, college, year, branch } = req.body || {}
+  if (![name, mobile, college, year, branch].every((value) => typeof value === 'string' && value.trim())) {
+    return res.status(400).json({ message: 'Name, mobile number, college, year, and branch are required.' })
   }
-  const profile = { name: name.trim(), college: college.trim(), year: year.trim(), branch: branch.trim() }
-  if (profile.name.length > 120 || profile.college.length > 200 || profile.year.length > 80 || profile.branch.length > 120) {
+  const profile = { name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: year.trim(), branch: branch.trim() }
+  if (!isValidMobile(profile.mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
+  if (profile.name.length > 120 || profile.mobile.length > 20 || profile.college.length > 200 || profile.year.length > 80 || profile.branch.length > 120) {
     return res.status(400).json({ message: 'One or more profile fields are too long.' })
   }
   const userRef = db.collection('users').doc(req.params.id)
@@ -208,8 +232,16 @@ app.patch('/api/admin/users/:id', authRequired, adminRequired, async (req, res) 
   res.json({ ...serializeUser(userSnapshot), ...profile })
 })
 app.patch('/api/admin/users/:id/block', authRequired, adminRequired, async (req, res) => {
-  await db.collection('users').doc(req.params.id).update({ blocked: Boolean(req.body.blocked) })
-  res.json({ id: req.params.id, blocked: Boolean(req.body.blocked) })
+  const userRef = db.collection('users').doc(req.params.id)
+  const userSnapshot = await userRef.get()
+  if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
+  const blocked = Boolean(req.body.blocked)
+  const target = { id: userSnapshot.id, ...userSnapshot.data() }
+  const batch = db.batch()
+  batch.update(userRef, { blocked })
+  batch.set(adminActionsCollection().doc(), createAdminAction(req, target, blocked ? 'user_blocked' : 'user_unblocked'))
+  await batch.commit()
+  res.json({ id: userSnapshot.id, blocked })
 })
 app.patch('/api/admin/users/:id/role', authRequired, adminRequired, async (req, res) => {
   const { role } = req.body
@@ -223,13 +255,25 @@ app.patch('/api/admin/users/:id/role', authRequired, adminRequired, async (req, 
 })
 app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
   if (req.params.id === req.user.id) return res.status(400).json({ message: 'You cannot delete your own admin account.' })
-  await db.recursiveDelete(db.collection('users').doc(req.params.id))
+  const userRef = db.collection('users').doc(req.params.id)
+  const userSnapshot = await userRef.get()
+  if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
+  const actionRef = adminActionsCollection().doc()
+  await actionRef.set(createAdminAction(req, { id: userSnapshot.id, ...userSnapshot.data() }, 'user_deleted', 'pending'))
+  await deletedAccountsCollection().doc(userSnapshot.id).set({ email: userSnapshot.data().email || '', deletedAt: FieldValue.serverTimestamp() })
+  try {
+    await db.recursiveDelete(userRef)
+    await actionRef.update({ status: 'completed', completedAt: FieldValue.serverTimestamp() })
+  } catch {
+    await actionRef.update({ status: 'failed', completedAt: FieldValue.serverTimestamp() })
+    return res.status(500).json({ message: 'User deletion failed; the admin action was recorded.' })
+  }
   res.json({ id: req.params.id, deleted: true })
 })
 app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res) => {
   const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
   const users = snapshot.docs.map(serialize)
-  const rows = users.map((user) => ({ Name: user.name || '', Email: user.email || '', College: user.college || '', Year: user.year || '', Branch: user.branch || '', Role: user.role || 'student', Blocked: user.blocked ? 'Yes' : 'No' }))
+  const rows = users.map((user) => ({ Name: user.name || '', Email: user.email || '', 'Mobile Number': user.mobile || '', College: user.college || '', Year: user.year || '', Branch: user.branch || '', Role: user.role || 'student', Blocked: user.blocked ? 'Yes' : 'No' }))
   const notesSnapshot = await db.collection('notes').orderBy('createdAt', 'desc').get()
   const noteRows = notesSnapshot.docs.map((noteSnapshot) => {
     const note = noteSnapshot.data()
@@ -254,10 +298,30 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
       })
     })
   }
+  const adminActionSnapshot = await adminActionsCollection().orderBy('occurredAt', 'asc').get()
+  const adminActionRows = adminActionSnapshot.docs.map((actionSnapshot) => {
+    const action = actionSnapshot.data()
+    return {
+      Action: action.action || '',
+      Status: action.status || '',
+      'Admin Name': action.actorName || '',
+      'Admin Email': action.actorEmail || '',
+      'Admin Mobile': action.actorMobile || '',
+      'Admin User ID': action.actorId || '',
+      'Target Name': action.targetName || '',
+      'Target Email': action.targetEmail || '',
+      'Target Mobile': action.targetMobile || '',
+      'Target User ID': action.targetUserId || '',
+      'IP Address': action.ipAddress || '',
+      'Action Time': toIso(action.occurredAt),
+      'Completed Time': toIso(action.completedAt),
+    }
+  })
   const workbook = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Students')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(noteRows), 'Uploaded Notes')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(activityRows), 'User Activity')
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(adminActionRows), 'Admin Actions')
   const output = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
   res.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').attachment('tech-titan-team-students.xlsx').send(output)
 })
@@ -291,12 +355,17 @@ app.post('/api/auth/signin', async (req, res) => {
   const normalizedEmail = email?.toLowerCase().trim()
   const userRef = db.collection('users').doc(Buffer.from(normalizedEmail || '').toString('base64url'))
   const snapshot = await userRef.get()
-  if (!snapshot.exists || !(await bcrypt.compare(password || '', snapshot.data().passwordHash || ''))) return res.status(401).json({ message: 'Email or password is incorrect.' })
+  if (!snapshot.exists) {
+    const deletedAccount = await deletedAccountsCollection().doc(userRef.id).get()
+    if (deletedAccount.exists) return res.status(410).json({ message: 'This account was removed by an administrator. Please register again with the same email address.' })
+    return res.status(401).json({ message: 'Email or password is incorrect.' })
+  }
+  if (!(await bcrypt.compare(password || '', snapshot.data().passwordHash || ''))) return res.status(401).json({ message: 'Email or password is incorrect.' })
   const user = snapshot.data()
   if (user.blocked) return res.status(403).json({ message: 'This account is blocked.' })
   await recordUserActivity(userRef.id, req, 'login')
   const token = jwt.sign({ userId: userRef.id, email: user.email }, process.env.JWT_SECRET || 'development-secret')
-  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, college: user.college || '', year: user.year || '', branch: user.branch || '', role: user.role, blocked: false } })
+  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile || '', college: user.college || '', year: user.year || '', branch: user.branch || '', role: user.role, blocked: false } })
 })
 
 app.post('/api/auth/logout', authRequired, async (req, res) => {
@@ -353,10 +422,11 @@ app.post('/api/auth/reset-password', async (req, res) => {
 })
 
 app.post('/api/auth/verify-otp', async (req, res) => {
-  const { email, code, password, name, college, year, branch } = req.body
+  const { email, code, password, name, mobile, college, year, branch } = req.body
   const normalizedEmail = email?.trim().toLowerCase()
   if (!normalizedEmail || !/^[^\s@]+@gmail\.com$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Use a valid Gmail address.' })
-  if (![name, college, year, branch].every((value) => typeof value === 'string' && value.trim())) return res.status(400).json({ message: 'Name, college, year, and branch are required.' })
+  if (![name, mobile, college, year, branch].every((value) => typeof value === 'string' && value.trim())) return res.status(400).json({ message: 'Name, mobile number, college, year, and branch are required.' })
+  if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
   if (!password || password.length < 8) return res.status(400).json({ message: 'A password of at least 8 characters is required.' })
   const record = otpStore.get(normalizedEmail)
   if (!record || record.purpose !== 'signup' || record.expires < Date.now() || record.code !== code) return res.status(401).json({ message: 'Invalid or expired code' })
@@ -364,22 +434,24 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   const userRef = db.collection('users').doc(Buffer.from(normalizedEmail).toString('base64url'))
   const existing = await userRef.get()
   if (existing.exists) return res.status(409).json({ message: 'An account already exists for this email. Sign in instead.' })
-  const user = { email: normalizedEmail, name: name.trim(), college: college.trim(), year: typeof year === 'string' ? year.trim() : '', branch: branch.trim(), passwordHash: await bcrypt.hash(password, 12), role: adminEmails.has(normalizedEmail) ? 'admin' : 'student', blocked: false, createdAt: FieldValue.serverTimestamp() }
+  const user = { email: normalizedEmail, name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: typeof year === 'string' ? year.trim() : '', branch: branch.trim(), passwordHash: await bcrypt.hash(password, 12), role: adminEmails.has(normalizedEmail) ? 'admin' : 'student', blocked: false, createdAt: FieldValue.serverTimestamp() }
   const registrationBatch = db.batch()
   registrationBatch.set(userRef, user)
   registrationBatch.set(userActivityCollection(userRef.id).doc(), createActivityRecord('registered', req))
+  registrationBatch.delete(deletedAccountsCollection().doc(userRef.id))
   await registrationBatch.commit()
   const responseUser = { id: userRef.id, ...user, createdAt: undefined }
   const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, process.env.JWT_SECRET || 'development-secret')
-  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, college: user.college, year: user.year, branch: user.branch, role: user.role, blocked: false } })
+  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile, college: user.college, year: user.year, branch: user.branch, role: user.role, blocked: false } })
 })
 
 app.patch('/api/me', authRequired, async (req, res) => {
-  const { name, college, year, branch } = req.body
-  if (![name, college, year, branch].every((value) => typeof value === 'string' && value.trim())) {
-    return res.status(400).json({ message: 'Name, college, year, and branch are required.' })
+  const { name, mobile, college, year, branch } = req.body
+  if (![name, mobile, college, year, branch].every((value) => typeof value === 'string' && value.trim())) {
+    return res.status(400).json({ message: 'Name, mobile number, college, year, and branch are required.' })
   }
-  const profile = { name: name.trim(), college: college.trim(), year: typeof year === 'string' ? year.trim() : '', branch: branch.trim() }
+  const profile = { name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: typeof year === 'string' ? year.trim() : '', branch: branch.trim() }
+  if (!isValidMobile(profile.mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
   await db.collection('users').doc(req.user.id).update(profile)
   res.json({ id: req.user.id, email: req.user.email, ...profile, role: req.user.role })
 })
@@ -390,10 +462,10 @@ const ensureAdmin = async () => {
   const userRef = db.collection('users').doc(Buffer.from(email).toString('base64url'))
   const existingUser = await userRef.get()
   if (existingUser.exists) {
-    await userRef.set({ email, role: 'admin', blocked: false }, { merge: true })
+    await userRef.set({ email, role: 'admin', blocked: false, mobile: '' }, { merge: true })
   } else {
     const passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12)
-    await userRef.set({ email, name: process.env.ADMIN_NAME || 'Tech Titan Admin', passwordHash, role: 'admin', blocked: false, college: '', year: '', branch: '', createdAt: FieldValue.serverTimestamp() })
+    await userRef.set({ email, name: process.env.ADMIN_NAME || 'Tech Titan Admin', mobile: '', passwordHash, role: 'admin', blocked: false, college: '', year: '', branch: '', createdAt: FieldValue.serverTimestamp() })
   }
   console.log(`Admin account ready for ${email}`)
 }

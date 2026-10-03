@@ -10,9 +10,14 @@ const years = ['1st year', '2nd year', '3rd year', '4th year']
 const subjects = ['Data Structures', 'Database Systems', 'Operating Systems', 'Web Development']
 const uploadLink = 'https://www.playbook.com/jnpboy/drop'
 const gmailPattern = /^[^\s@]+@gmail\.com$/i
+const isValidMobile = (value) => {
+  const mobile = value.trim()
+  const digitCount = (mobile.match(/\d/g) || []).length
+  return mobile.length <= 20 && /^\+?[0-9][0-9\s().-]*$/.test(mobile) && digitCount >= 7 && digitCount <= 15
+}
 const userMatchesQuery = (user, query) => {
   const normalizedQuery = query.trim().toLowerCase()
-  return !normalizedQuery || [user.name, user.email, user.college, user.year, user.branch, user.role]
+  return !normalizedQuery || [user.name, user.email, user.mobile, user.college, user.year, user.branch, user.role]
     .some((value) => String(value || '').toLowerCase().includes(normalizedQuery))
 }
 const students = [
@@ -34,6 +39,7 @@ function App() {
   const [adminUsers, setAdminUsers] = useState([])
   const [adminNotes, setAdminNotes] = useState([])
   const [notice, setNotice] = useState('')
+  const [newUploadCount, setNewUploadCount] = useState(0)
   const [connectionError, setConnectionError] = useState('')
   const [connectionAttempt, setConnectionAttempt] = useState(0)
   const signedIn = Boolean(session?.token)
@@ -47,8 +53,11 @@ function App() {
     let knownNoteIds = new Set()
     const refreshNotes = () => getNotes(session.token).then((nextNotes) => {
       if (!active) return
-      const hasNewNotes = nextNotes.some((note) => !knownNoteIds.has(note.id || note.title))
-      if (initialized && hasNewNotes) setNotice('New notes are available in your subject room.')
+      const newNotes = nextNotes.filter((note) => !knownNoteIds.has(note.id || note.title))
+      if (initialized && newNotes.length) {
+        setNewUploadCount(Math.min(newNotes.length, 7))
+        setNotice(`${newNotes.length} new note${newNotes.length === 1 ? ' is' : 's are'} available.`)
+      }
       knownNoteIds = new Set(nextNotes.map((note) => note.id || note.title))
       initialized = true
       setConnectionError('')
@@ -83,6 +92,7 @@ function App() {
     setSession(nextSession)
     setAuthOpen(false)
     setNotice('')
+    setNewUploadCount(0)
     setView('notes')
   }
 
@@ -100,6 +110,7 @@ function App() {
     localStorage.removeItem('tech-titan-session')
     setSession(null)
     setView('home')
+    setNewUploadCount(0)
     setNotice(logoutError ? `Signed out, but activity could not be recorded: ${logoutError}` : 'You have been signed out.')
   }
 
@@ -143,6 +154,7 @@ function App() {
       const created = await createNote({ ...note, year: folder.year, subject: folder.subject, folderId: folder.id, status: 'approved' }, session.token)
       setAdminNotes((current) => [created, ...current])
       setLiveNotes((current) => [created, ...current])
+      setNewUploadCount(1)
       setNotice('Note published. Students will see it in their subject room shortly.')
       return true
     } catch (error) { setNotice(error.message); return false }
@@ -232,7 +244,7 @@ function App() {
       <main>
         {view === 'profile' && signedIn ? <ProfileView user={session.user} onSave={handleProfileSave} onBack={() => setView('home')} /> : <>
         <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
-        <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
+        <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 7)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
         <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
         {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
         {isAdmin && <ContentAdminManager users={adminUsers} onSetRole={handleSetContentRole} />}
@@ -261,14 +273,36 @@ function Home({ onExplore, onSignIn, signedIn }) {
   </>
 }
 
-function NotesView({ subject, setSubject, search, setSearch, notes, folders, studentYear, connectionError, onRetry, onNoteAccess }) {
+function NotesView({ subject, setSubject, search, setSearch, notes, latestUploads, newUploadCount, onDismissNewUploads, folders, studentYear, connectionError, onRetry, onNoteAccess }) {
   const [showAllNotes, setShowAllNotes] = useState(false)
   const studentFolders = folders
   const availableSubjects = ['All notes', ...new Set(studentFolders.map((folder) => folder.subject))]
   const selectedFolder = studentFolders.find((folder) => folder.subject === subject)
   const filteredNotes = notes.filter((note) => (subject === 'All notes' || (selectedFolder && (note.folderId ? note.folderId === selectedFolder.id : note.subject === subject))) && `${note.title} ${note.subject}`.toLowerCase().includes(search.toLowerCase()))
-  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 5)
-  return <section className="page-width app-page"><div className="view-heading"><div><span className="eyebrow">The library / 01</span><h1>Find your<br /><i>unfair advantage.</i></h1></div><span className="year-badge">{studentYear || 'All years'} subject room</span></div>{connectionError && <div className="connection-banner" role="alert"><span><strong>Connection interrupted</strong>{connectionError}</span><button className="button button-dark" onClick={onRetry}>Try again</button></div>}<div className="upload-rule"><UploadCloud size={18} /><span>Folders and subjects are organized by your year. Share a note through the public drop at the bottom of this page.</span></div><div className="toolbar"><div className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes, subjects..." /></div><div className="subject-tabs">{availableSubjects.length > 1 ? availableSubjects.map((item) => <button className={subject === item ? 'subject-tab selected' : 'subject-tab'} key={item} onClick={() => setSubject(item)}>{item}</button>) : <span className="panel-caption">No subject folders yet for this year.</span>}</div></div><div className="notes-list">{visibleNotes.map((note) => <NoteCard key={note.id || note.title} note={note} list onAccess={onNoteAccess} />)}{filteredNotes.length === 0 && <div className="empty-state">No approved notes match that search yet.</div>}</div>{filteredNotes.length > 5 && <button className="list-toggle notes-list-toggle" onClick={() => setShowAllNotes((shown) => !shown)}>{showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`} <ChevronDown size={15} className={showAllNotes ? 'list-toggle-open' : ''} /></button>}</section>
+  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 7)
+  return <section className="page-width app-page">
+    <div className="view-heading"><div><span className="eyebrow">The library / 01</span><h1>Find your<br /><i>unfair advantage.</i></h1></div><span className="year-badge">{studentYear || 'All years'} subject room</span></div>
+    {connectionError && <div className="connection-banner" role="alert"><span><strong>Connection interrupted</strong>{connectionError}</span><button className="button button-dark" onClick={onRetry}>Try again</button></div>}
+    <LatestUploadsPanel notes={latestUploads} newUploadCount={newUploadCount} onDismiss={onDismissNewUploads} onNoteAccess={onNoteAccess} />
+    <div className="upload-rule"><UploadCloud size={18} /><span>Folders and subjects are organized by your year. Share a note through the public drop at the bottom of this page.</span></div>
+    <div className="toolbar"><div className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes, subjects..." /></div><div className="subject-tabs">{availableSubjects.length > 1 ? availableSubjects.map((item) => <button className={subject === item ? 'subject-tab selected' : 'subject-tab'} key={item} onClick={() => setSubject(item)}>{item}</button>) : <span className="panel-caption">No subject folders yet for this year.</span>}</div></div>
+    <div className="notes-list">{visibleNotes.map((note) => <NoteCard key={note.id || note.title} note={note} list onAccess={onNoteAccess} />)}{filteredNotes.length === 0 && <div className="empty-state">No approved notes match that search yet.</div>}</div>
+    {filteredNotes.length > 7 && <button className="list-toggle notes-list-toggle" onClick={() => setShowAllNotes((shown) => !shown)}>{showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`} <ChevronDown size={15} className={showAllNotes ? 'list-toggle-open' : ''} /></button>}
+  </section>
+}
+
+function LatestUploadsPanel({ notes, newUploadCount, onDismiss, onNoteAccess }) {
+  if (!notes.length) return null
+  return <section className="latest-uploads-panel" aria-label="Latest uploads">
+    <div className="latest-uploads-heading">
+      <div><span className="eyebrow">Fresh from the library</span><h2>Latest uploads</h2></div>
+      <span className="latest-uploads-count">Latest {notes.length}</span>
+    </div>
+    {newUploadCount > 0 && <div className="latest-upload-alert" role="status"><span><strong>{newUploadCount > 1 ? `${newUploadCount} new notes` : 'New note'} just arrived</strong><small>New notes from the team are ready to explore.</small></span><button onClick={onDismiss} aria-label="Dismiss new upload notification"><X size={17} /></button></div>}
+    <div className="latest-uploads-list">{notes.map((note, index) => <a className="latest-upload-item" href={note.driveLink || '#'} target="_blank" rel="noreferrer" key={note.id || note.title} onClick={() => onNoteAccess?.(note)}>
+      <span className="latest-upload-index">{String(index + 1).padStart(2, '0')}</span><span className="latest-upload-copy"><strong>{note.title}</strong><small>{note.subject}{note.author ? ` · ${note.author}` : ''}</small></span><ArrowUpRight size={16} />
+    </a>)}</div>
+  </section>
 }
 
 function UploadCta() {
@@ -296,6 +330,7 @@ function StudentsView({ onProfile }) {
 function ProfileView({ user, onSave, onBack }) {
   const [profile, setProfile] = useState({
     name: user?.name || '',
+    mobile: user?.mobile || '',
     college: user?.college || '',
     year: user?.year || '',
     branch: user?.branch || '',
@@ -312,8 +347,12 @@ function ProfileView({ user, onSave, onBack }) {
   const updateField = (field) => (event) => setProfile((current) => ({ ...current, [field]: event.target.value }))
   const submit = async (event) => {
     event.preventDefault()
-    if ([profile.name, profile.college, profile.year, profile.branch].some((value) => !value.trim())) {
+    if ([profile.name, profile.mobile, profile.college, profile.year, profile.branch].some((value) => !value.trim())) {
       setError('Complete every profile field before saving.')
+      return
+    }
+    if (!isValidMobile(profile.mobile)) {
+      setError('Enter a valid mobile number with 7 to 15 digits.')
       return
     }
     setSaving(true)
@@ -347,6 +386,7 @@ function ProfileView({ user, onSave, onBack }) {
         <div className="panel-title"><span>Edit your details</span><Settings2 size={17} /></div>
         <label>Email<input type="email" value={user?.email || ''} readOnly /></label>
         <label>Full name<input value={profile.name} onChange={updateField('name')} required /></label>
+        <label>Mobile number<input type="tel" inputMode="tel" autoComplete="tel" maxLength={20} value={profile.mobile} onChange={updateField('mobile')} required /></label>
         <label>College<input value={profile.college} onChange={updateField('college')} required /></label>
         <div className="two-fields">
           <label>Year<input value={profile.year} onChange={updateField('year')} required /></label>
@@ -415,9 +455,9 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
   const [showAllUsers, setShowAllUsers] = useState(false)
   const [selectedUser, setSelectedUser] = useState(null)
   const filteredUsers = users.filter((user) => userMatchesQuery(user, userFilter))
-  const visibleUsers = showAllUsers ? filteredUsers : filteredUsers.slice(0, 5)
+  const visibleUsers = showAllUsers ? filteredUsers : filteredUsers.slice(0, 7)
   const filteredQueueNotes = notes.filter((note) => `${note.title} ${note.year} ${note.subject} ${note.author} ${note.status}`.toLowerCase().includes(queueNoteFilter.trim().toLowerCase()))
-  const visibleQueueNotes = showAllQueueNotes ? filteredQueueNotes : filteredQueueNotes.slice(0, 5)
+  const visibleQueueNotes = showAllQueueNotes ? filteredQueueNotes : filteredQueueNotes.slice(0, 7)
 
   return <section className="page-width app-page">
     <div className="view-heading"><div><span className="eyebrow">Admin only / 03</span><h1>Keep the room<br /><i>in motion.</i></h1></div><a className="button button-dark" href={getExportUrl(token)} target="_blank" rel="noreferrer"><Download size={17} /> Export workbook</a></div>
@@ -439,7 +479,7 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
         {note.status === 'pending' && <><button className="button compact-button" onClick={() => onNoteStatus(note.id, 'approved')}>Approve</button><button className="button compact-button danger-button" onClick={() => onNoteStatus(note.id, 'rejected')}>Reject</button></>}
       </div>)}
       {filteredQueueNotes.length === 0 && <div className="empty-state">{notes.length ? 'No notes match this search.' : 'No notes have been submitted yet.'}</div>}
-      {filteredQueueNotes.length > 5 && <button className="list-toggle" onClick={() => setShowAllQueueNotes((shown) => !shown)}>{showAllQueueNotes ? 'Show fewer notes' : `Show all ${filteredQueueNotes.length} notes`} <ChevronDown size={15} className={showAllQueueNotes ? 'list-toggle-open' : ''} /></button>}
+      {filteredQueueNotes.length > 7 && <button className="list-toggle" onClick={() => setShowAllQueueNotes((shown) => !shown)}>{showAllQueueNotes ? 'Show fewer notes' : `Show all ${filteredQueueNotes.length} notes`} <ChevronDown size={15} className={showAllQueueNotes ? 'list-toggle-open' : ''} /></button>}
     </div>
     <div className="admin-table">
       <div className="table-title"><div><span className="eyebrow">Access management</span><h2>Users</h2></div><span className="panel-caption">Only full admins can see this area</span></div>
@@ -449,14 +489,14 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
         <div className="user-row-actions"><button className="button compact-button" onClick={() => setSelectedUser(user)}>Details / edit</button><button className="button compact-button" onClick={() => onBlock(user.id, !user.blocked)}>{user.blocked ? 'Unblock' : 'Block'}</button><button className="button compact-button danger-button" onClick={() => { if (window.confirm(`Delete ${user.name || user.email}?`)) onDelete(user.id) }}>Delete</button></div>
       </div>)}
       {filteredUsers.length === 0 && <div className="empty-state">No users match this search.</div>}
-      {filteredUsers.length > 5 && <button className="list-toggle" onClick={() => setShowAllUsers((shown) => !shown)}>{showAllUsers ? 'Show fewer users' : `Show all ${filteredUsers.length} users`} <ChevronDown size={15} className={showAllUsers ? 'list-toggle-open' : ''} /></button>}
+      {filteredUsers.length > 7 && <button className="list-toggle" onClick={() => setShowAllUsers((shown) => !shown)}>{showAllUsers ? 'Show fewer users' : `Show all ${filteredUsers.length} users`} <ChevronDown size={15} className={showAllUsers ? 'list-toggle-open' : ''} /></button>}
     </div>
     {selectedUser && <AdminUserDetailsModal user={selectedUser} token={token} onClose={() => setSelectedUser(null)} onSave={onUpdateUser} />}
   </section>
 }
 
 function AdminUserDetailsModal({ user, token, onClose, onSave }) {
-  const [profile, setProfile] = useState({ name: user.name || '', college: user.college || '', year: user.year || '', branch: user.branch || '' })
+  const [profile, setProfile] = useState({ name: user.name || '', mobile: user.mobile || '', college: user.college || '', year: user.year || '', branch: user.branch || '' })
   const [registeredAt, setRegisteredAt] = useState(user.registeredAt || '')
   const [activity, setActivity] = useState([])
   const [loading, setLoading] = useState(true)
@@ -467,7 +507,7 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
     let active = true
     getAdminUserDetails(user.id, token).then((details) => {
       if (!active) return
-      setProfile({ name: details.user.name || '', college: details.user.college || '', year: details.user.year || '', branch: details.user.branch || '' })
+      setProfile({ name: details.user.name || '', mobile: details.user.mobile || '', college: details.user.college || '', year: details.user.year || '', branch: details.user.branch || '' })
       setRegisteredAt(details.user.registeredAt || '')
       setActivity(details.activity)
     }).catch((requestError) => { if (active) setError(requestError.message) }).finally(() => { if (active) setLoading(false) })
@@ -476,11 +516,15 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
 
   const submit = async (event) => {
     event.preventDefault()
+    if (!isValidMobile(profile.mobile)) {
+      setError('Enter a valid mobile number with 7 to 15 digits.')
+      return
+    }
     setSaving(true)
     setError('')
     try {
       const updated = await onSave(user.id, profile)
-      setProfile({ name: updated.name, college: updated.college, year: updated.year, branch: updated.branch })
+      setProfile({ name: updated.name, mobile: updated.mobile, college: updated.college, year: updated.year, branch: updated.branch })
     } catch (saveError) { setError(saveError.message) } finally { setSaving(false) }
   }
 
@@ -492,6 +536,7 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
       <p className="modal-copy">{user.email} · {registeredAt ? `Registered ${new Date(registeredAt).toLocaleString()}` : 'Registration date unavailable'}</p>
       <form className="user-detail-form" onSubmit={submit}>
         <label className="modal-label">Full name<input required maxLength={120} value={profile.name} onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></label>
+        <label className="modal-label">Mobile number<input type="tel" inputMode="tel" autoComplete="tel" maxLength={20} required value={profile.mobile} onChange={(event) => setProfile({ ...profile, mobile: event.target.value })} /></label>
         <label className="modal-label">College<input required maxLength={200} value={profile.college} onChange={(event) => setProfile({ ...profile, college: event.target.value })} /></label>
         <label className="modal-label">Year<input required maxLength={80} value={profile.year} onChange={(event) => setProfile({ ...profile, year: event.target.value })} /></label>
         <label className="modal-label">Branch<input required maxLength={120} value={profile.branch} onChange={(event) => setProfile({ ...profile, branch: event.target.value })} /></label>
@@ -513,19 +558,22 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
 
 function ContentAdminManager({ users, onSetRole }) {
   const [userFilter, setUserFilter] = useState('')
+  const [showAllEligible, setShowAllEligible] = useState(false)
   const eligibleUsers = users.filter((user) => user.role !== 'admin' && userMatchesQuery(user, userFilter))
+  const visibleEligibleUsers = showAllEligible ? eligibleUsers : eligibleUsers.slice(0, 7)
   return <section className="page-width app-page">
     <div className="admin-panel">
       <div className="panel-title"><span>Note manager access</span><ShieldCheck size={17} /></div>
       <p className="panel-help">Grant note upload and editing access without user, folder, or export controls.</p>
       <div className="search-box"><Search size={17} /><input type="search" value={userFilter} onChange={(event) => setUserFilter(event.target.value)} placeholder="Find user by name, email, college, year, branch, or role" /></div>
-      {eligibleUsers.map((user) => <div className="manage-row" key={user.id}>
+      {visibleEligibleUsers.map((user) => <div className="manage-row" key={user.id}>
         <span><b>{user.name || 'Unnamed user'}</b><small>{user.email} · {user.role}</small></span>
         <button className="button compact-button" disabled={user.blocked} onClick={() => onSetRole(user.id, user.role === 'content_admin' ? 'student' : 'content_admin')}>
           {user.role === 'content_admin' ? 'Remove access' : 'Grant access'}
         </button>
       </div>)}
       {eligibleUsers.length === 0 && <div className="empty-state">No users match this search.</div>}
+      {eligibleUsers.length > 7 && <button className="list-toggle" onClick={() => setShowAllEligible((shown) => !shown)}>{showAllEligible ? 'Show fewer users' : `Show all ${eligibleUsers.length} users`} <ChevronDown size={15} className={showAllEligible ? 'list-toggle-open' : ''} /></button>}
     </div>
   </section>
 }
@@ -581,20 +629,20 @@ function AdminManageContent({ folders, notes, onEditFolder, onDeleteFolder, onEd
   const normalizedNoteSearch = noteSearch.trim().toLowerCase()
   const filteredFolders = folders.filter((folder) => `${folder.subject} ${folder.year}`.toLowerCase().includes(normalizedFolderSearch))
   const filteredNotes = notes.filter((note) => `${note.title} ${note.subject} ${note.year} ${note.author} ${note.status}`.toLowerCase().includes(normalizedNoteSearch))
-  const visibleFolders = showAllFolders ? filteredFolders : filteredFolders.slice(0, 5)
-  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 5)
+  const visibleFolders = showAllFolders ? filteredFolders : filteredFolders.slice(0, 7)
+  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 7)
   return <div className="admin-workspace">
     {isAdmin && <section className="admin-panel"><div className="panel-title"><span>Manage folders</span><GraduationCap size={17} /></div>
       <div className="search-box management-search"><Search size={16} /><input type="search" value={folderSearch} onChange={(event) => setFolderSearch(event.target.value)} placeholder="Search folders by subject or year" /></div>
       {visibleFolders.map((folder) => <div className="manage-row" key={folder.id}><span><b>{folder.subject}</b><small>{folder.year}</small></span><button className="button compact-button" onClick={() => onEditFolder(folder)}>Edit</button><button className="button compact-button danger-button" onClick={() => onDeleteFolder(folder)}>Delete</button></div>)}
       {filteredFolders.length === 0 && <div className="empty-state">{folders.length ? 'No folders match this search.' : 'No subject folders yet.'}</div>}
-      {filteredFolders.length > 5 && <button className="list-toggle" onClick={() => setShowAllFolders((shown) => !shown)}>{showAllFolders ? 'Show fewer folders' : `Show all ${filteredFolders.length} folders`} <ChevronDown size={15} className={showAllFolders ? 'list-toggle-open' : ''} /></button>}
+      {filteredFolders.length > 7 && <button className="list-toggle" onClick={() => setShowAllFolders((shown) => !shown)}>{showAllFolders ? 'Show fewer folders' : `Show all ${filteredFolders.length} folders`} <ChevronDown size={15} className={showAllFolders ? 'list-toggle-open' : ''} /></button>}
     </section>}
     <section className="admin-panel"><div className="panel-title"><span>Manage published content</span><Settings2 size={17} /></div>
       <div className="search-box management-search"><Search size={16} /><input type="search" value={noteSearch} onChange={(event) => setNoteSearch(event.target.value)} placeholder="Search notes by title, subject, or status" /></div>
       {visibleNotes.map((note) => <div className="manage-row" key={note.id}><span><b>{note.title}</b><small>{note.year} · {note.subject} · {note.status}</small></span><button className="button compact-button" onClick={() => setEditingNote(note)}>Edit</button><button className="button compact-button danger-button" onClick={() => onDeleteNote(note)}>Delete</button></div>)}
       {filteredNotes.length === 0 && <div className="empty-state">{notes.length ? 'No notes match this search.' : 'No published or submitted notes yet.'}</div>}
-      {filteredNotes.length > 5 && <button className="list-toggle" onClick={() => setShowAllNotes((shown) => !shown)}>{showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`} <ChevronDown size={15} className={showAllNotes ? 'list-toggle-open' : ''} /></button>}
+      {filteredNotes.length > 7 && <button className="list-toggle" onClick={() => setShowAllNotes((shown) => !shown)}>{showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`} <ChevronDown size={15} className={showAllNotes ? 'list-toggle-open' : ''} /></button>}
     </section>
     {editingNote && <EditPublishedNoteModal note={editingNote} folders={folders} canChangeFolder={isAdmin} onClose={() => setEditingNote(null)} onSave={onEditNote} />}
   </div>
@@ -607,6 +655,7 @@ function AuthModal({ onClose, onSuccess }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
+  const [mobile, setMobile] = useState('')
   const [college, setCollege] = useState('')
   const [year, setYear] = useState('')
   const [branch, setBranch] = useState('')
@@ -619,17 +668,18 @@ function AuthModal({ onClose, onSuccess }) {
     try { onSuccess(await signIn(email, password)) } catch (requestError) { setError(requestError.message) }
   }
   const validateSignup = () => {
-    if ([name, college, year, branch, email, password].some((value) => !value.trim())) {
+    if ([name, mobile, college, year, branch, email, password].some((value) => !value.trim())) {
       setError('Complete every signup field.')
       return false
     }
+    if (!isValidMobile(mobile)) { setError('Enter a valid mobile number with 7 to 15 digits.'); return false }
     if (!gmailPattern.test(email)) { setError('Use a valid Gmail address ending with @gmail.com.'); return false }
     if (password.length < 8) { setError('A password of at least 8 characters is required.'); return false }
     return true
   }
   const submitSignup = async () => {
     if (!validateSignup()) return
-    try { onSuccess(await verifySignupCode(email, code, password, name, college, year, branch)) } catch (requestError) { setError(requestError.message) }
+    try { onSuccess(await verifySignupCode(email, code, password, name, college, year, branch, mobile)) } catch (requestError) { setError(requestError.message) }
   }
   const sendSignupCode = async () => {
     if (!validateSignup()) return
@@ -648,7 +698,7 @@ function AuthModal({ onClose, onSuccess }) {
   }
   const changeMode = (nextMode) => { setMode(nextMode); setStep('form'); setError(''); setMessage(''); setCode('') }
 
-  return <div className="modal-backdrop"><div className="auth-modal"><button className="modal-close" onClick={onClose}><X size={18} /></button><div className="auth-symbol"><LockKeyhole size={20} /></div>{mode !== 'reset' && <div className="auth-switch"><button className={mode === 'signin' ? 'selected' : ''} onClick={() => changeMode('signin')}>Sign in</button><button className={mode === 'signup' ? 'selected' : ''} onClick={() => changeMode('signup')}>Sign up</button><button className={mode === 'forgot' ? 'selected' : ''} onClick={() => changeMode('forgot')}>Forgot password</button></div>}{mode === 'forgot' ? <><span className="eyebrow">Reset access</span><h2>Find your<br /><i>way back.</i></h2><p className="modal-copy">Enter your email and we’ll send a reset link.</p><label className="modal-label">Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@college.edu" /></label><button className="button button-dark full" onClick={sendReset} disabled={!email}>Send reset link <Mail size={16} /></button></> : mode === 'reset' ? <><span className="eyebrow">New password</span><h2>Set a fresh<br /><i>start.</i></h2><label className="modal-label">New password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label><button className="button button-dark full" onClick={submitReset} disabled={password.length < 8}>Update password <ArrowUpRight size={16} /></button></> : mode === 'signup' && step === 'otp' ? <><span className="eyebrow">Verify signup</span><h2>One last<br /><i>step.</i></h2><p className="modal-copy">Enter the code sent to {email} to finish creating your account.</p><label className="modal-label">Signup OTP<input className="otp-input" inputMode="numeric" maxLength="6" value={code} onChange={(event) => setCode(event.target.value)} placeholder="• • •  • • •" /></label><button className="button button-dark full" onClick={submitSignup} disabled={code.length !== 6}>Verify & create account <ArrowUpRight size={16} /></button></> : <><span className="eyebrow">{mode === 'signin' ? 'Welcome back' : 'Create account'}</span><h2>{mode === 'signin' ? <>Sign in to your<br /><i>space.</i></> : <>Sign up for your<br /><i>space.</i></>}</h2><p className="modal-copy">{mode === 'signin' ? 'Sign in with your email and password.' : 'Signup requires one email verification code. Sign in does not.'}</p>{mode === 'signup' && <><label className="modal-label">Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></label><label className="modal-label">College<input value={college} onChange={(event) => setCollege(event.target.value)} placeholder="Your college" /></label><div className="two-fields"><label className="modal-label">Year<input value={year} onChange={(event) => setYear(event.target.value)} placeholder="3rd year" /></label><label className="modal-label">Branch<input value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="Computer Science" /></label></div></>}<label className="modal-label">Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@college.edu" /></label><label className="modal-label">Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label><button className="button button-dark full" onClick={mode === 'signup' ? sendSignupCode : submitSignIn} disabled={!email || password.length < 8}>{mode === 'signup' ? 'Send signup OTP' : 'Sign in'} <ArrowUpRight size={16} /></button></>}{error && <p className="form-error">{error}</p>}{message && <p className="form-success">{message}</p>}</div></div>
+  return <div className="modal-backdrop"><div className="auth-modal"><button className="modal-close" onClick={onClose}><X size={18} /></button><div className="auth-symbol"><LockKeyhole size={20} /></div>{mode !== 'reset' && <div className="auth-switch"><button className={mode === 'signin' ? 'selected' : ''} onClick={() => changeMode('signin')}>Sign in</button><button className={mode === 'signup' ? 'selected' : ''} onClick={() => changeMode('signup')}>Sign up</button><button className={mode === 'forgot' ? 'selected' : ''} onClick={() => changeMode('forgot')}>Forgot password</button></div>}{mode === 'forgot' ? <><span className="eyebrow">Reset access</span><h2>Find your<br /><i>way back.</i></h2><p className="modal-copy">Enter your email and we’ll send a reset link.</p><label className="modal-label">Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@college.edu" /></label><button className="button button-dark full" onClick={sendReset} disabled={!email}>Send reset link <Mail size={16} /></button></> : mode === 'reset' ? <><span className="eyebrow">New password</span><h2>Set a fresh<br /><i>start.</i></h2><label className="modal-label">New password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label><button className="button button-dark full" onClick={submitReset} disabled={password.length < 8}>Update password <ArrowUpRight size={16} /></button></> : mode === 'signup' && step === 'otp' ? <><span className="eyebrow">Verify signup</span><h2>One last<br /><i>step.</i></h2><p className="modal-copy">Enter the code sent to {email} to finish creating your account.</p><label className="modal-label">Signup OTP<input className="otp-input" inputMode="numeric" maxLength="6" value={code} onChange={(event) => setCode(event.target.value)} placeholder="• • •  • • •" /></label><button className="button button-dark full" onClick={submitSignup} disabled={code.length !== 6}>Verify & create account <ArrowUpRight size={16} /></button></> : <><span className="eyebrow">{mode === 'signin' ? 'Welcome back' : 'Create account'}</span><h2>{mode === 'signin' ? <>Sign in to your<br /><i>space.</i></> : <>Sign up for your<br /><i>space.</i></>}</h2><p className="modal-copy">{mode === 'signin' ? 'Sign in with your email and password.' : 'Signup requires one email verification code. Sign in does not.'}</p>{mode === 'signup' && <><label className="modal-label">Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></label><label className="modal-label">Mobile number<input type="tel" inputMode="tel" autoComplete="tel" maxLength={20} value={mobile} onChange={(event) => setMobile(event.target.value)} placeholder="e.g. +1 555 123 4567" required /></label><label className="modal-label">College<input value={college} onChange={(event) => setCollege(event.target.value)} placeholder="Your college" /></label><div className="two-fields"><label className="modal-label">Year<input value={year} onChange={(event) => setYear(event.target.value)} placeholder="3rd year" /></label><label className="modal-label">Branch<input value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="Computer Science" /></label></div></>}<label className="modal-label">Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@college.edu" /></label><label className="modal-label">Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label><button className="button button-dark full" onClick={mode === 'signup' ? sendSignupCode : submitSignIn} disabled={!email || password.length < 8}>{mode === 'signup' ? 'Send signup OTP' : 'Sign in'} <ArrowUpRight size={16} /></button></>}{error && <p className="form-error">{error}</p>}{message && <p className="form-success">{message}</p>}</div></div>
 }
 
 function LegacyAuthModal({ onClose, onSuccess }) {
