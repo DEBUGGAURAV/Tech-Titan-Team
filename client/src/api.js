@@ -37,6 +37,8 @@ export const getAdminNotes = (token) => request('/admin/notes', {}, token)
 export const updateNote = (id, changes, token) => request(`/notes/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }, token)
 export const deleteNote = (id, token) => request(`/notes/${id}`, { method: 'DELETE' }, token)
 export const getAdminUsers = (token) => request('/admin/users', {}, token)
+export const getAdminRoleRequests = (token) => request('/admin/admin-requests', {}, token)
+export const decideAdminRoleRequest = (id, decision, token) => request(`/admin/admin-requests/${id}/decision`, { method: 'POST', body: JSON.stringify({ decision }) }, token)
 export const getAdminUserDetails = (id, token) => request(`/admin/users/${id}`, {}, token)
 export const updateAdminUser = (id, profile, token) => request(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(profile) }, token)
 export const setUserBlocked = (id, blocked, token) => request(`/admin/users/${id}/block`, { method: 'PATCH', body: JSON.stringify({ blocked }) }, token)
@@ -45,4 +47,16 @@ export const deleteAdminUser = (id, token) => request(`/admin/users/${id}`, { me
 export const deleteAllAdminUsers = (token) => request('/admin/users', { method: 'DELETE' }, token)
 export const recordNoteAccess = (id, token) => request(`/notes/${id}/access`, { method: 'POST' }, token)
 export const recordLogout = (token) => request('/auth/logout', { method: 'POST' }, token)
-export const getExportUrl = (token) => `${API_URL}/admin/users/export?token=${encodeURIComponent(token)}`
+export const downloadAdminExport = async (token) => {
+  const response = await fetch(`${API_URL}/admin/users/export`, { headers: { Authorization: `Bearer ${token}` } })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(body.message || 'Unable to export the workbook.')
+  }
+  const downloadUrl = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = downloadUrl
+  link.download = 'tech-titan-team-students.xlsx'
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0)
+}

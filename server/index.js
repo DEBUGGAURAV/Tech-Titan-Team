@@ -11,6 +11,8 @@ import * as XLSX from 'xlsx'
 
 const app = express()
 const port = process.env.PORT || 5000
+const jwtSecret = process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' || process.env.RENDER ? '' : 'development-secret')
+if (!jwtSecret) throw new Error('JWT_SECRET must be configured in production.')
 app.set('trust proxy', process.env.RENDER ? 1 : false)
 const otpStore = new Map()
 const resetStore = new Map()
@@ -43,14 +45,33 @@ const isValidMobile = (value) => {
 const toIso = (value) => value?.toDate?.().toISOString() || (typeof value === 'string' ? value : '')
 const userActivityCollection = (userId) => db.collection('users').doc(userId).collection('activity')
 const adminActionsCollection = () => db.collection('adminActions')
+const adminRoleRequestsCollection = () => db.collection('adminRoleRequests')
 const deletedAccountsCollection = () => db.collection('deletedAccounts')
+const isPrimaryAdmin = (user) => Boolean((process.env.ADMIN_EMAIL || '').trim()) && user?.email?.trim().toLowerCase() === process.env.ADMIN_EMAIL.trim().toLowerCase()
+const serializeAdminRoleRequest = (snapshot) => {
+  const request = snapshot.data()
+  return {
+    id: snapshot.id,
+    requesterName: request.requesterName || '',
+    requesterEmail: request.requesterEmail || '',
+    targetUserId: request.targetUserId || '',
+    targetName: request.targetName || '',
+    targetEmail: request.targetEmail || '',
+    status: request.status || 'pending',
+    requestedAt: toIso(request.requestedAt),
+    decidedByName: request.decidedByName || '',
+    decidedByEmail: request.decidedByEmail || '',
+    decisionNote: request.decisionNote || '',
+    decidedAt: toIso(request.decidedAt),
+  }
+}
 const describeNotePermissions = (user) => {
   if (user.role === 'admin') return 'Full admin'
   if (user.role === 'content_admin') return 'Upload, edit, delete, review'
   const labels = { uploadNotes: 'Upload', editNotes: 'Edit', deleteNotes: 'Delete', reviewNotes: 'Review' }
   return notePermissionNames.filter((permission) => user.permissions?.[permission] === true).map((permission) => labels[permission]).join(', ')
 }
-const createNoticeRecord = async ({ title, message, type = 'general', createdBy, createdByName, createdByRole, relatedNoteId = '' }) => {
+const createNoticeRecord = async ({ title, message, type = 'general' }) => {
   const safeTitle = String(title || '').trim()
   const safeMessage = String(message || '').trim()
   if (!safeTitle || !safeMessage) return null
@@ -58,10 +79,6 @@ const createNoticeRecord = async ({ title, message, type = 'general', createdBy,
     title: safeTitle.slice(0, 120),
     message: safeMessage.slice(0, 1000),
     type: ['general', 'note', 'update'].includes(type) ? type : 'general',
-    createdBy: createdBy || '',
-    createdByName: createdByName || '',
-    createdByRole: createdByRole || 'admin',
-    relatedNoteId: relatedNoteId || '',
     createdAt: FieldValue.serverTimestamp(),
     expiresAt: Date.now() + noticeExpiryMs,
   }
@@ -120,8 +137,8 @@ app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'tech-titan-
 
 const authRequired = async (req, res, next) => {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '') || req.query.token
-    const identity = jwt.verify(token, process.env.JWT_SECRET || 'development-secret')
+    const token = req.headers.authorization?.replace('Bearer ', '')
+    const identity = jwt.verify(token, jwtSecret)
     const snapshot = await db.collection('users').doc(identity.userId).get()
     if (!snapshot.exists || snapshot.data().blocked) return res.status(403).json({ message: 'This account is blocked.' })
     req.user = { id: snapshot.id, ...snapshot.data() }
@@ -135,11 +152,18 @@ const adminRequired = (req, res, next) => req.user?.role === 'admin' ? next() : 
 const notePermissionNames = ['uploadNotes', 'editNotes', 'deleteNotes', 'reviewNotes']
 const hasNotePermission = (user, permission) => user?.role === 'admin' || user?.role === 'content_admin' || user?.permissions?.[permission] === true
 const hasAnyNotePermission = (user) => notePermissionNames.some((permission) => hasNotePermission(user, permission))
-const serialize = (snapshot) => ({ id: snapshot.id, ...snapshot.data() })
+const serialize = (snapshot) => {
+  const data = snapshot.data()
+  return { id: snapshot.id, ...data, ...(data.createdAt ? { createdAt: toIso(data.createdAt) || data.createdAt } : {}) }
+}
+const serializePublicNote = (snapshot) => {
+  const { authorId, ...note } = serialize(snapshot)
+  return { ...note, author: note.author ? 'Student contributor' : '' }
+}
 
 app.get('/api/notes', authRequired, async (_req, res) => {
   const snapshot = await db.collection('notes').where('status', '==', 'approved').get()
-  res.json(snapshot.docs.map(serialize).sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || ''))))
+  res.json(snapshot.docs.map(serializePublicNote).sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || ''))))
 })
 app.post('/api/notes/:id/access', authRequired, async (req, res) => {
   const noteSnapshot = await db.collection('notes').doc(req.params.id).get()
@@ -165,10 +189,6 @@ app.post('/api/notes', authRequired, async (req, res) => {
       title: 'New note added',
       message: `${note.title} was published in ${note.subject} (${note.year}).`,
       type: 'note',
-      createdBy: req.user.id,
-      createdByName: req.user.name || req.user.email || 'Admin',
-      createdByRole: req.user.role || 'admin',
-      relatedNoteId: created.id,
     })
   }
   res.status(201).json({ id: created.id, ...note, createdAt: new Date().toISOString() })
@@ -204,20 +224,12 @@ app.patch('/api/notes/:id', authRequired, async (req, res) => {
       title: 'New note updated',
       message: `${existingNote.data().title || 'A note'} was approved and is now live in ${existingNote.data().subject || 'the library'} (${existingNote.data().year || 'general'}).`,
       type: 'note',
-      createdBy: req.user.id,
-      createdByName: req.user.name || req.user.email || 'Admin',
-      createdByRole: req.user.role || 'admin',
-      relatedNoteId: req.params.id,
     })
   } else if (Object.keys(changes).some((key) => ['title', 'driveLink', 'subject', 'year', 'folderId'].includes(key)) && existingNote.exists) {
     await createNoticeRecord({
       title: 'Note updated',
-      message: `${existingNote.data().title || 'A note'} was updated by ${req.user.name || req.user.email || 'an admin'}.`,
+      message: `${existingNote.data().title || 'A note'} was updated in the library.`,
       type: 'update',
-      createdBy: req.user.id,
-      createdByName: req.user.name || req.user.email || 'Admin',
-      createdByRole: req.user.role || 'admin',
-      relatedNoteId: req.params.id,
     })
   }
   res.json({ id: req.params.id, ...changes })
@@ -242,25 +254,20 @@ app.get('/api/notices', authRequired, async (_req, res) => {
   await pruneExpiredNotices()
   const snapshot = await noticeBoardCollection().orderBy('createdAt', 'desc').get()
   const notices = snapshot.docs
-    .map((doc) => ({ id: doc.id, ...doc.data(), expiresAt: typeof doc.data().expiresAt === 'number' ? doc.data().expiresAt : Date.now() + noticeExpiryMs }))
+    .map((doc) => {
+      const notice = doc.data()
+      return { id: doc.id, title: notice.title, message: notice.message, type: notice.type || 'general', createdAt: toIso(notice.createdAt), expiresAt: typeof notice.expiresAt === 'number' ? notice.expiresAt : Date.now() + noticeExpiryMs }
+    })
     .filter((notice) => (notice.expiresAt || Date.now()) > Date.now())
     .sort((left, right) => Number(right.expiresAt || 0) - Number(left.expiresAt || 0))
   res.json(notices)
 })
 app.post('/api/notices', authRequired, async (req, res) => {
   if (!canManageNoticeBoard(req.user)) return res.status(403).json({ message: 'Notice board management access required.' })
-  const { title, message, type, relatedNoteId } = req.body || {}
+  const { title, message, type } = req.body || {}
   if (typeof title !== 'string' || !title.trim()) return res.status(400).json({ message: 'Notice title is required.' })
   if (typeof message !== 'string' || !message.trim()) return res.status(400).json({ message: 'Notice details are required.' })
-  const notice = await createNoticeRecord({
-    title,
-    message,
-    type,
-    relatedNoteId,
-    createdBy: req.user.id,
-    createdByName: req.user.name || req.user.email || 'Admin',
-    createdByRole: req.user.role || 'admin',
-  })
+  const notice = await createNoticeRecord({ title, message, type })
   if (!notice) return res.status(400).json({ message: 'Notice could not be created.' })
   res.status(201).json(notice)
 })
@@ -378,6 +385,31 @@ app.patch('/api/admin/users/:id/permissions', authRequired, adminRequired, async
   const snapshot = await userRef.get()
   if (!snapshot.exists) return res.status(404).json({ message: 'User not found.' })
   const currentUser = snapshot.data()
+  if (fullAdmin && currentUser.blocked) return res.status(409).json({ message: 'Unblock this user before granting admin access.' })
+  if (fullAdmin && currentUser.role !== 'admin' && !isPrimaryAdmin(req.user)) {
+    const existingRequests = await adminRoleRequestsCollection().where('targetUserId', '==', snapshot.id).get()
+    if (existingRequests.docs.some((request) => request.data().status === 'pending')) {
+      return res.status(409).json({ message: 'An admin promotion request for this user is already pending.' })
+    }
+    const requestData = {
+      requesterId: req.user.id,
+      requesterName: req.user.name || '',
+      requesterEmail: req.user.email || '',
+      targetUserId: snapshot.id,
+      targetName: currentUser.name || '',
+      targetEmail: currentUser.email || '',
+      status: 'pending',
+      requestedAt: FieldValue.serverTimestamp(),
+    }
+    const requestRef = await adminRoleRequestsCollection().add(requestData)
+    return res.status(202).json({
+      id: snapshot.id,
+      role: currentUser.role || 'student',
+      permissions: currentUser.permissions || {},
+      pendingApproval: true,
+      request: { ...requestData, id: requestRef.id, requestedAt: new Date().toISOString() },
+    })
+  }
   const role = fullAdmin ? 'admin' : Object.values(permissions).some(Boolean) ? 'note_manager' : 'student'
   if (snapshot.id === req.user.id && currentUser.role === 'admin' && role !== 'admin') return res.status(400).json({ message: 'You cannot remove your own full admin access.' })
   if (isProtectedAdminEmail(currentUser.email) && role !== 'admin' && req.user.email?.toLowerCase() !== (currentUser.email || '').trim().toLowerCase()) {
@@ -393,6 +425,64 @@ app.patch('/api/admin/users/:id/permissions', authRequired, adminRequired, async
   batch.set(actionRef, { ...createAdminAction(req, { id: snapshot.id, ...currentUser }, 'user_permissions_updated'), permissions, fullAdmin, status: 'completed' })
   await batch.commit()
   res.json({ id: snapshot.id, role, permissions })
+})
+app.get('/api/admin/admin-requests', authRequired, adminRequired, async (req, res) => {
+  if (!isPrimaryAdmin(req.user)) return res.json({ canApprove: false, requests: [] })
+  const snapshot = await adminRoleRequestsCollection().orderBy('requestedAt', 'desc').get()
+  const requests = snapshot.docs.map(serializeAdminRoleRequest).filter((request) => request.status === 'pending')
+  res.json({ canApprove: true, requests })
+})
+app.post('/api/admin/admin-requests/:id/decision', authRequired, adminRequired, async (req, res) => {
+  if (!isPrimaryAdmin(req.user)) return res.status(403).json({ message: 'Only the main admin can review admin promotion requests.' })
+  const decision = req.body?.decision
+  if (!['approve', 'reject'].includes(decision)) return res.status(400).json({ message: 'Choose approve or reject.' })
+  const requestRef = adminRoleRequestsCollection().doc(req.params.id)
+  const actionRef = adminActionsCollection().doc()
+  let targetUserId = ''
+  try {
+    await db.runTransaction(async (transaction) => {
+      const requestSnapshot = await transaction.get(requestRef)
+      if (!requestSnapshot.exists) {
+        const error = new Error('Admin promotion request not found.')
+        error.statusCode = 404
+        throw error
+      }
+      const request = requestSnapshot.data()
+      if (request.status !== 'pending') {
+        const error = new Error('This admin promotion request has already been reviewed.')
+        error.statusCode = 409
+        throw error
+      }
+      const userRef = db.collection('users').doc(request.targetUserId)
+      const userSnapshot = await transaction.get(userRef)
+      if (!userSnapshot.exists) {
+        const error = new Error('The requested user no longer exists.')
+        error.statusCode = 404
+        throw error
+      }
+      const target = { id: userSnapshot.id, ...userSnapshot.data() }
+      if (decision === 'approve' && target.blocked) {
+        const error = new Error('Unblock this user before approving admin access.')
+        error.statusCode = 409
+        throw error
+      }
+      targetUserId = userSnapshot.id
+      if (decision === 'approve' && target.role !== 'admin') {
+        transaction.update(userRef, { role: 'admin', permissions: Object.fromEntries(notePermissionNames.map((permission) => [permission, false])) })
+      }
+      transaction.update(requestRef, {
+        status: decision === 'approve' ? 'approved' : 'rejected',
+        decidedById: req.user.id,
+        decidedByName: req.user.name || '',
+        decidedByEmail: req.user.email || '',
+        decidedAt: FieldValue.serverTimestamp(),
+      })
+      transaction.set(actionRef, createAdminAction(req, target, decision === 'approve' ? 'admin_promotion_approved' : 'admin_promotion_rejected'))
+    })
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ message: error.message || 'Unable to review this request.' })
+  }
+  res.json({ id: req.params.id, status: decision === 'approve' ? 'approved' : 'rejected', targetUserId })
 })
 const archiveAndDeleteUser = async (req, userSnapshot) => {
   const userRef = userSnapshot.ref
@@ -530,14 +620,30 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
       'Completed Time': toIso(action.completedAt),
     }
   })
+  const adminRoleRequestSnapshot = await adminRoleRequestsCollection().orderBy('requestedAt', 'asc').get()
+  const adminRoleRequestRows = adminRoleRequestSnapshot.docs.map((requestSnapshot) => {
+    const request = requestSnapshot.data()
+    return {
+      'Requested By Admin': request.requesterName || '',
+      'Requester Email': request.requesterEmail || '',
+      'Requested User': request.targetName || '',
+      'Requested User Email': request.targetEmail || '',
+      'Request Status': request.status || 'pending',
+      'Requested At': toIso(request.requestedAt),
+      'Decision By': request.decidedByName || '',
+      'Decision Admin Email': request.decidedByEmail || '',
+      'Decision At': toIso(request.decidedAt),
+    }
+  })
   const workbook = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Students')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(noteRows), 'Uploaded Notes')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(activityRows), 'User Activity')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(adminActionRows), 'Admin Actions')
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(adminRoleRequestRows), 'Admin Requests')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(deletedUserRows), 'Deleted Users')
   const output = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
-  res.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').attachment('tech-titan-team-students.xlsx').send(output)
+  res.set('Cache-Control', 'no-store').header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').attachment('tech-titan-team-students.xlsx').send(output)
 })
 
 app.post('/api/auth/request-otp', async (req, res) => {
@@ -631,7 +737,7 @@ app.post('/api/auth/signin', async (req, res) => {
   const user = snapshot.data()
   if (user.blocked) return res.status(403).json({ message: 'This account is blocked.' })
   await recordUserActivity(userRef.id, req, 'login')
-  const token = jwt.sign({ userId: userRef.id, email: user.email }, process.env.JWT_SECRET || 'development-secret')
+  const token = jwt.sign({ userId: userRef.id, email: user.email }, jwtSecret)
   res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile || '', college: user.college || '', year: user.year || '', branch: user.branch || '', course: user.course || user.branch || '', role: user.role, permissions: user.permissions || {}, blocked: false } })
 })
 
@@ -709,7 +815,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   registrationBatch.set(userActivityCollection(userRef.id).doc(), createActivityRecord('registered', req, { year: user.year, course: user.course }))
   await registrationBatch.commit()
   const responseUser = { id: userRef.id, ...user, createdAt: undefined }
-  const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, process.env.JWT_SECRET || 'development-secret')
+  const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, jwtSecret)
   res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile, college: user.college, year: user.year, branch: user.branch, course: user.course, role: user.role, permissions: user.permissions || {}, blocked: false } })
 })
 

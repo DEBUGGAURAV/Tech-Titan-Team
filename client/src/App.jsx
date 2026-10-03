@@ -6,11 +6,12 @@ import {
 } from 'lucide-react'
 import {
   changePassword, createFolder, createNote, createNotice, deleteAdminUser,
-  deleteAllAdminUsers, deleteFolder, deleteNote, forgotPassword, getAdminNotes,
-  getAdminUserDetails, getAdminUsers, getExportUrl, getFolders, getNotices,
+  deleteAllAdminUsers, deleteFolder, deleteNote, decideAdminRoleRequest,
+  forgotPassword, getAdminNotes, getAdminRoleRequests, getAdminUserDetails,
+  getAdminUsers, getFolders, getNotices,
   getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword,
   setUserBlocked, setUserPermissions, signIn, signUp, updateAdminUser,
-  updateFolder, updateNote, updateProfile, verifySignupCode,
+  updateFolder, updateNote, updateProfile, verifySignupCode, downloadAdminExport,
 } from './api'
 
 const years = ['1st year', '2nd year', '3rd year', '4th year']
@@ -52,6 +53,8 @@ function App() {
   const [liveNotes, setLiveNotes] = useState([])
   const [folders, setFolders] = useState([])
   const [adminUsers, setAdminUsers] = useState([])
+  const [adminRoleRequests, setAdminRoleRequests] = useState([])
+  const [canApproveAdminRequests, setCanApproveAdminRequests] = useState(false)
   const [adminNotes, setAdminNotes] = useState([])
   const [noticeBoard, setNoticeBoard] = useState([])
   const [notice, setNotice] = useState('')
@@ -65,6 +68,8 @@ function App() {
   useEffect(() => {
     if (!session?.token) {
       setNoticeBoard([])
+      setAdminRoleRequests([])
+      setCanApproveAdminRequests(false)
       return
     }
     let active = true
@@ -94,15 +99,35 @@ function App() {
         if (active) setNoticeBoard([])
       })
     }
+    const refreshAdminRoleRequests = () => {
+      if (!isAdmin) return
+      getAdminRoleRequests(session.token).then((result) => {
+        if (!active) return
+        setCanApproveAdminRequests(result.canApprove)
+        setAdminRoleRequests(result.requests)
+      }).catch(() => {
+        if (active) {
+          setCanApproveAdminRequests(false)
+          setAdminRoleRequests([])
+        }
+      })
+    }
     refreshNotes()
     refreshNoticeBoard()
+    refreshAdminRoleRequests()
     const refreshTimer = window.setInterval(() => {
       refreshNotes()
       refreshNoticeBoard()
+      refreshAdminRoleRequests()
     }, 30000)
     document.addEventListener('visibilitychange', refreshNotes)
     getFolders(session.token).then(setFolders).catch(() => setFolders([]))
-    if (isAdmin) getAdminUsers(session.token).then(setAdminUsers).catch(() => setAdminUsers([]))
+    if (isAdmin) {
+      getAdminUsers(session.token).then(setAdminUsers).catch(() => setAdminUsers([]))
+    } else {
+      setAdminRoleRequests([])
+      setCanApproveAdminRequests(false)
+    }
     if (canManageContent) getAdminNotes(session.token).then(setAdminNotes).catch(() => setAdminNotes([]))
     return () => { active = false; window.clearInterval(refreshTimer); document.removeEventListener('visibilitychange', refreshNotes) }
   }, [session, isAdmin, canManageContent, connectionAttempt])
@@ -252,8 +277,24 @@ function App() {
   const handleSetContentPermissions = async (id, permissions, fullAdmin) => {
     try {
       const updated = await setUserPermissions(id, permissions, fullAdmin, session.token)
+      if (updated.pendingApproval) {
+        setNotice('Admin promotion request sent to the main admin for review.')
+        return updated
+      }
       setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, ...updated } : user))
       setNotice('Access permissions saved. The user must sign in again.')
+      return updated
+    } catch (error) { setNotice(error.message) }
+  }
+
+  const handleAdminRoleRequestDecision = async (request, decision) => {
+    try {
+      const result = await decideAdminRoleRequest(request.id, decision, session.token)
+      setAdminRoleRequests((requests) => requests.filter((item) => item.id !== request.id))
+      if (result.status === 'approved') {
+        setAdminUsers((users) => users.map((user) => user.id === result.targetUserId ? { ...user, role: 'admin', permissions: {} } : user))
+      }
+      setNotice(`Admin promotion request ${result.status}.`)
     } catch (error) { setNotice(error.message) }
   }
 
@@ -267,6 +308,13 @@ function App() {
       setNotice(error.message)
       return false
     }
+  }
+
+  const handleExportUsers = async () => {
+    try {
+      await downloadAdminExport(session.token)
+      setNotice('Admin workbook downloaded.')
+    } catch (error) { setNotice(error.message) }
   }
 
   const handleDeleteAllUsers = async () => {
@@ -306,8 +354,8 @@ function App() {
         <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 8)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
         <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
         {signedIn && <NoticeBoard notices={noticeBoard} canManage={canManageContent || isAdmin} onCreateNotice={handleCreateNotice} />}
-        {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onDeleteAll={handleDeleteAllUsers} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
-        {isAdmin && <ContentAdminManager users={adminUsers} onSavePermissions={handleSetContentPermissions} />}
+        {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} roleRequests={adminRoleRequests} canApproveAdminRequests={canApproveAdminRequests} onRoleRequestDecision={handleAdminRoleRequestDecision} onExport={handleExportUsers} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onDeleteAll={handleDeleteAllUsers} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
+        {isAdmin && <ContentAdminManager users={adminUsers} canApproveAdminRequests={canApproveAdminRequests} onSavePermissions={handleSetContentPermissions} />}
         {canManageContent && !isAdmin && <div id="admin"><ContentAdminView folders={folders} notes={adminNotes} permissions={session.user.permissions || {}} onCreateNote={handleAdminNote} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onNoteStatus={handleNoteStatus} /></div>}
         </>}
       </main>
@@ -355,12 +403,12 @@ function LatestUploadsPanel({ notes, newUploadCount, onDismiss, onNoteAccess }) 
   if (!notes.length) return null
   return <section className="latest-uploads-panel" aria-label="Latest uploads">
     <div className="latest-uploads-heading">
-      <div><span className="eyebrow">Fresh from the library</span><h2>Latest uploads</h2></div>
-      <span className="latest-uploads-count">Latest {notes.length}</span>
+      <div><span className="eyebrow"><span className="live-dot" /> Fresh from the library</span><h2>Latest uploads</h2></div>
+      <span className="latest-uploads-count">{notes.length} in the feed</span>
     </div>
     {newUploadCount > 0 && <div className="latest-upload-alert" role="status"><span><strong>{newUploadCount > 1 ? `${newUploadCount} new notes` : 'New note'} just arrived</strong><small>New notes from the team are ready to explore.</small></span><button onClick={onDismiss} aria-label="Dismiss new upload notification"><X size={17} /></button></div>}
-    <div className="latest-uploads-list">{notes.map((note, index) => <a className="latest-upload-item" href={note.driveLink || '#'} target="_blank" rel="noreferrer" key={note.id || note.title} onClick={() => onNoteAccess?.(note)}>
-      <span className="latest-upload-index">{String(index + 1).padStart(2, '0')}</span><span className="latest-upload-copy"><strong>{note.title}</strong><small>{note.subject}{note.author ? ` · ${note.author}` : ''}</small></span><ArrowUpRight size={16} />
+    <div className="latest-uploads-list">{notes.map((note, index) => <a className={`latest-upload-item ${index === 0 ? 'latest-upload-featured' : ''}`} href={note.driveLink || '#'} target="_blank" rel="noreferrer" key={note.id || note.title} onClick={() => onNoteAccess?.(note)}>
+      <span className="latest-upload-index">{index === 0 ? 'NEW' : String(index + 1).padStart(2, '0')}</span><span className="latest-upload-copy"><strong>{note.title}</strong><small>{note.subject} · {note.createdAt ? new Date(note.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recently added'}</small></span><ArrowUpRight size={16} />
     </a>)}</div>
   </section>
 }
@@ -470,12 +518,13 @@ function ProfileView({ user, onSave, onBack }) {
   </section>
 }
 
-function LegacyAdminView({ users, notes, folders, token, onCreateFolder, onCreateNote, onNoteStatus, onBlock, onDelete, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote }) {
+function LegacyAdminView({ users, notes, folders, onCreateFolder, onCreateNote, onNoteStatus, onBlock, onDelete, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote }) {
+  const token = ''
   return <section className="page-width app-page"><div className="view-heading"><div><span className="eyebrow">Admin only / 03</span><h1>Keep the room<br /><i>in motion.</i></h1></div><a className="button button-dark" href={`http://localhost:5000/api/admin/users/export?token=${encodeURIComponent(token)}`} target="_blank" rel="noreferrer"><Download size={17} /> Export users</a></div><div className="admin-grid"><div className="admin-stat-card dark"><span>Total users</span><strong>{users.length}</strong><small>Firestore records</small></div><div className="admin-stat-card cream"><span>Subject folders</span><strong>{folders.length}</strong><small>Year-wise library map</small></div><div className="admin-stat-card yellow-card"><span>Review queue</span><strong>{notes.filter((note) => note.status === 'pending').length}</strong><small>Notes awaiting approval</small></div></div><div className="admin-workspace"><div className="admin-panel"><div className="panel-title"><span>Create subject folder</span><GraduationCap size={17} /></div><p className="panel-help">Every folder appears as a subject tab for students in its selected year.</p><FolderForm onSubmit={onCreateFolder} /></div><div className="admin-panel"><div className="panel-title"><span>Publish a note</span><UploadCloud size={17} /></div><p className="panel-help">Attach the note to a year and folder so it lands in the right student room.</p><AdminNoteForm folders={folders} onSubmit={onCreateNote} /></div></div><div className="admin-table"><div className="table-title"><div><span className="eyebrow">Content queue</span><h2>Notes</h2></div><span className="panel-caption">Approve or reject student submissions</span></div>{notes.length === 0 && <div className="empty-state">No notes have been submitted yet.</div>}{notes.map((note) => <div className="table-row" key={note.id}><span className={`file-dot ${note.status === 'approved' ? 'green' : 'yellow'}`}><FileText size={16} /></span><span className="row-name"><b>{note.title}</b><small>{note.year} · {note.subject} · {note.author}</small></span><span className={note.status === 'approved' ? 'review-pill' : 'review-pill pending-pill'}>{note.status}</span>{note.status === 'pending' && <><button className="button compact-button" onClick={() => onNoteStatus(note.id, 'approved')}>Approve</button><button className="button compact-button danger-button" onClick={() => onNoteStatus(note.id, 'rejected')}>Reject</button></>}</div>)}</div><div className="admin-table"><div className="table-title"><div><span className="eyebrow">Access management</span><h2>Users</h2></div><span className="panel-caption">Only admins can see this area</span></div>{users.map((user) => <div className="table-row" key={user.id}><span className="file-dot blue"><Users size={16} /></span><span className="row-name"><b>{user.name || 'Unnamed student'}</b><small>{user.email} · {user.role}</small></span><span className={user.blocked ? 'review-pill blocked-pill' : 'review-pill'}>{user.blocked ? 'Blocked' : 'Active'}</span><button className="button compact-button" onClick={() => onBlock(user.id, !user.blocked)}>{user.blocked ? 'Unblock' : 'Block'}</button><button className="button compact-button danger-button" onClick={() => { if (window.confirm(`Delete ${user.name || user.email}?`)) onDelete(user.id) }}>Delete</button></div>)}</div></section>
   return <section className="page-width app-page">
     <div className="view-heading">
       <div><span className="eyebrow">Admin only / 03</span><h1>Keep the room<br /><i>in motion.</i></h1></div>
-      <a className="button button-dark" href={getExportUrl(token)} target="_blank" rel="noreferrer"><Download size={17} /> Export workbook</a>
+      <button className="button button-dark" onClick={onExport}><Download size={17} /> Export workbook</button>
     </div>
     <div className="admin-grid">
       <div className="admin-stat-card dark"><span>Total users</span><strong>{users.length}</strong><small>Firestore records</small></div>
@@ -519,9 +568,9 @@ function NoticeBoard({ notices, canManage, onCreateNotice }) {
     if (saved) setDraft({ title: '', message: '' })
   }
 
-  return <section className="page-width app-page">
-    <div className="view-heading"><div><span className="eyebrow">Notice board</span><h1>Team updates &nbsp;<i>in one place.</i></h1></div></div>
-    {canManage && <div className="admin-panel" style={{ marginBottom: '18px' }}>
+  return <section className="page-width app-page notice-board-section">
+    <div className="view-heading notice-board-heading"><div><span className="eyebrow">Notice board / 02</span><h1>Fresh notes.<br /><i>Shared momentum.</i></h1></div><span className="notice-board-stamp"><Sparkles size={16} /> LIBRARY SIGNAL</span></div>
+    {canManage && <div className="admin-panel notice-composer">
       <div className="panel-title"><span>Publish notice</span><Sparkles size={17} /></div>
       <form className="admin-form" onSubmit={submit}>
         <label className="modal-label">Title<input required value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} placeholder="e.g. New note upload" /></label>
@@ -530,17 +579,18 @@ function NoticeBoard({ notices, canManage, onCreateNotice }) {
       </form>
     </div>}
     <div className="notice-board-list">
-      {notices.length ? notices.map((notice) => <article className="notice-card" key={notice.id}>
+      {notices.length ? notices.map((notice, index) => <article className={`notice-card notice-card-${notice.type || 'general'}`} key={notice.id}>
+        <span className="notice-card-index">{String(index + 1).padStart(2, '0')}</span>
         <div className="notice-card-top"><span className="review-pill">{notice.type || 'general'}</span><small>{notice.createdAt ? new Date(notice.createdAt).toLocaleDateString() : 'Recent'}</small></div>
         <h3>{notice.title}</h3>
         <p>{notice.message}</p>
-        <small className="notice-meta">Posted by {notice.createdByName || 'Admin'} · expires in {Math.max(1, Math.ceil((Number(notice.expiresAt || 0) - Date.now()) / 86400000))} day(s)</small>
+        <small className="notice-meta">Library team · expires in {Math.max(1, Math.ceil((Number(notice.expiresAt || 0) - Date.now()) / 86400000))} day(s)</small>
       </article>) : <div className="empty-state">No active notices yet. Admin updates will appear here.</div>}
     </div>
   </section>
 }
 
-function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote, onNoteStatus, onBlock, onDelete, onDeleteAll, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote, onUpdateUser }) {
+function AdminView({ users, notes, folders, token, roleRequests, canApproveAdminRequests, onRoleRequestDecision, onExport, onCreateFolder, onCreateNote, onNoteStatus, onBlock, onDelete, onDeleteAll, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote, onUpdateUser }) {
   const [userFilter, setUserFilter] = useState('')
   const [queueNoteFilter, setQueueNoteFilter] = useState('')
   const [showAllQueueNotes, setShowAllQueueNotes] = useState(false)
@@ -552,12 +602,13 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
   const visibleQueueNotes = showAllQueueNotes ? filteredQueueNotes : filteredQueueNotes.slice(0, 7)
 
   return <section className="page-width app-page">
-    <div className="view-heading"><div><span className="eyebrow">Admin only / 03</span><h1>Keep the room<br /><i>in motion.</i></h1></div><a className="button button-dark" href={getExportUrl(token)} target="_blank" rel="noreferrer"><Download size={17} /> Export workbook</a></div>
+    <div className="view-heading"><div><span className="eyebrow">Admin only / 03</span><h1>Keep the room<br /><i>in motion.</i></h1></div><button className="button button-dark" onClick={onExport}><Download size={17} /> Export workbook</button></div>
     <div className="admin-grid">
       <div className="admin-stat-card dark"><span>Total users</span><strong>{users.length}</strong><small>Firestore records</small></div>
       <div className="admin-stat-card cream"><span>Subject folders</span><strong>{folders.length}</strong><small>Year-wise library map</small></div>
       <div className="admin-stat-card yellow-card"><span>Review queue</span><strong>{notes.filter((note) => note.status === 'pending').length}</strong><small>Notes awaiting admin review</small></div>
     </div>
+    {canApproveAdminRequests && <AdminPromotionRequests requests={roleRequests} onDecision={onRoleRequestDecision} />}
     <div className="admin-workspace">
       <div className="admin-panel"><div className="panel-title"><span>Create subject folder</span><GraduationCap size={17} /></div><p className="panel-help">Every folder appears as a subject tab for students in its selected year.</p><FolderForm onSubmit={onCreateFolder} /></div>
       <div className="admin-panel"><div className="panel-title"><span>Publish a note</span><UploadCloud size={17} /></div><p className="panel-help">Attach the note to a year and folder so it lands in the right student room.</p><AdminNoteForm folders={folders} onSubmit={onCreateNote} /></div>
@@ -585,6 +636,18 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
     </div>
     {selectedUser && <AdminUserDetailsModal user={selectedUser} token={token} onClose={() => setSelectedUser(null)} onSave={onUpdateUser} />}
   </section>
+}
+
+function AdminPromotionRequests({ requests, onDecision }) {
+  return <div className="admin-table admin-promotion-requests">
+    <div className="table-title"><div><span className="eyebrow">Main admin review</span><h2>Admin access requests</h2></div><span className="panel-caption">{requests.length} pending</span></div>
+    {requests.length ? requests.map((request) => <div className="admin-request-row" key={request.id}>
+      <div className="admin-request-parties"><b>{request.targetName || 'Unnamed user'}</b><small>{request.targetEmail}</small></div>
+      <div className="admin-request-parties"><span>Requested by</span><b>{request.requesterName || 'Admin'}</b><small>{request.requesterEmail}</small></div>
+      <small className="admin-request-date">{request.requestedAt ? new Date(request.requestedAt).toLocaleString() : 'Just now'}</small>
+      <div className="admin-request-actions"><button className="button button-dark" onClick={() => onDecision(request, 'approve')}><Check size={15} /> Approve</button><button className="button danger-button" onClick={() => onDecision(request, 'reject')}><X size={15} /> Reject</button></div>
+    </div>) : <div className="empty-state">No pending admin promotion requests.</div>}
+  </div>
 }
 
 function AdminUserDetailsModal({ user, token, onClose, onSave }) {
@@ -649,7 +712,7 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
   </div>
 }
 
-function ContentAdminManager({ users, onSavePermissions }) {
+function ContentAdminManager({ users, canApproveAdminRequests, onSavePermissions }) {
   const [userFilter, setUserFilter] = useState('')
   const [showAllEligible, setShowAllEligible] = useState(false)
   const eligibleUsers = users.filter((user) => userMatchesQuery(user, userFilter))
@@ -657,16 +720,16 @@ function ContentAdminManager({ users, onSavePermissions }) {
   return <section className="page-width app-page">
     <div className="admin-panel">
       <div className="panel-title"><span>Note manager access</span><ShieldCheck size={17} /></div>
-      <p className="panel-help">Choose note-only capabilities or grant full administration access.</p>
+      <p className="panel-help">Choose note-only capabilities. Full admin access from another admin requires main admin approval.</p>
       <div className="search-box"><Search size={17} /><input type="search" value={userFilter} onChange={(event) => setUserFilter(event.target.value)} placeholder="Find user by name, email, college, year, branch, or role" /></div>
-      {visibleEligibleUsers.map((user) => <UserPermissionEditor key={user.id} user={user} onSave={onSavePermissions} />)}
+      {visibleEligibleUsers.map((user) => <UserPermissionEditor key={`${user.id}-${user.role}`} user={user} canApproveAdminRequests={canApproveAdminRequests} onSave={onSavePermissions} />)}
       {eligibleUsers.length === 0 && <div className="empty-state">No users match this search.</div>}
       {eligibleUsers.length > 7 && <button className="list-toggle" onClick={() => setShowAllEligible((shown) => !shown)}>{showAllEligible ? 'Show fewer users' : `Show all ${eligibleUsers.length} users`} <ChevronDown size={15} className={showAllEligible ? 'list-toggle-open' : ''} /></button>}
     </div>
   </section>
 }
 
-function UserPermissionEditor({ user, onSave }) {
+function UserPermissionEditor({ user, canApproveAdminRequests, onSave }) {
   const legacyNoteManager = user.role === 'content_admin'
   const currentUserId = JSON.parse(localStorage.getItem('tech-titan-session') || 'null')?.user?.id
   const cannotRevokeOwnAdmin = user.id === currentUserId && user.role === 'admin'
@@ -675,14 +738,17 @@ function UserPermissionEditor({ user, onSave }) {
   const [saving, setSaving] = useState(false)
   const save = async () => {
     setSaving(true)
-    try { await onSave(user.id, permissions, fullAdmin) } finally { setSaving(false) }
+    try {
+      const result = await onSave(user.id, permissions, fullAdmin)
+      if (result?.pendingApproval) setFullAdmin(false)
+    } finally { setSaving(false) }
   }
 
   return <div className="permission-row">
     <div className="permission-user"><b>{user.name || 'Unnamed user'}</b><small>{user.email} · {user.role}{user.blocked ? ' · blocked' : ''}</small></div>
     <div className="permission-options">
       {notePermissionOptions.map(({ key, label }) => <label key={key}><input type="checkbox" checked={permissions[key]} disabled={fullAdmin || user.blocked} onChange={(event) => setPermissions((current) => ({ ...current, [key]: event.target.checked }))} />{label}</label>)}
-      <label className="full-admin-option"><input type="checkbox" checked={fullAdmin} disabled={user.blocked || cannotRevokeOwnAdmin} onChange={(event) => setFullAdmin(event.target.checked)} /><span><b>Full admin access</b><small>{cannotRevokeOwnAdmin ? 'Your own full-admin access cannot be removed here.' : 'Users, folders, exports, and all note controls'}</small></span></label>
+      <label className="full-admin-option"><input type="checkbox" checked={fullAdmin} disabled={user.blocked || cannotRevokeOwnAdmin} onChange={(event) => setFullAdmin((event.target.checked))} /><span><b>{canApproveAdminRequests || user.role === 'admin' ? 'Full admin access' : 'Request full admin access'}</b><small>{cannotRevokeOwnAdmin ? 'Your own full-admin access cannot be removed here.' : canApproveAdminRequests || user.role === 'admin' ? 'Users, folders, exports, and all note controls' : 'Requires approval from the main admin.'}</small></span></label>
     </div>
     <button className="button button-dark permission-save" disabled={saving || user.blocked} onClick={save}>{saving ? 'Saving…' : 'Save permissions'} <Check size={15} /></button>
   </div>
