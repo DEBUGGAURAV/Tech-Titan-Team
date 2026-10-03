@@ -4,12 +4,20 @@ import {
   GraduationCap, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Pencil, Plus,
   Search, Settings2, ShieldCheck, Sparkles, UploadCloud, Users, X, Zap,
 } from 'lucide-react'
-import { changePassword, createFolder, createNote, deleteAdminUser, deleteFolder, deleteNote, forgotPassword, getAdminNotes, getAdminUserDetails, getAdminUsers, getExportUrl, getFolders, getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword, setUserBlocked, setUserRole, signIn, signUp, updateAdminUser, updateFolder, updateNote, updateProfile, verifySignupCode } from './api'
+import { changePassword, createFolder, createNote, deleteAdminUser, deleteFolder, deleteNote, forgotPassword, getAdminNotes, getAdminUserDetails, getAdminUsers, getExportUrl, getFolders, getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword, setUserBlocked, setUserPermissions, signIn, signUp, updateAdminUser, updateFolder, updateNote, updateProfile, verifySignupCode } from './api'
 
 const years = ['1st year', '2nd year', '3rd year', '4th year']
 const subjects = ['Data Structures', 'Database Systems', 'Operating Systems', 'Web Development']
 const uploadLink = 'https://www.playbook.com/jnpboy/drop'
 const gmailPattern = /^[^\s@]+@gmail\.com$/i
+const notePermissionOptions = [
+  { key: 'uploadNotes', label: 'Upload / publish notes' },
+  { key: 'editNotes', label: 'Edit notes' },
+  { key: 'deleteNotes', label: 'Delete notes' },
+  { key: 'reviewNotes', label: 'Approve / reject submissions' },
+]
+const hasNotePermission = (user, permission) => user?.role === 'admin' || user?.role === 'content_admin' || user?.permissions?.[permission] === true
+const hasAnyNotePermission = (user) => user?.role === 'admin' || user?.role === 'content_admin' || notePermissionOptions.some(({ key }) => user?.permissions?.[key] === true)
 const isValidMobile = (value) => {
   const mobile = value.trim()
   const digitCount = (mobile.match(/\d/g) || []).length
@@ -44,7 +52,7 @@ function App() {
   const [connectionAttempt, setConnectionAttempt] = useState(0)
   const signedIn = Boolean(session?.token)
   const isAdmin = session?.user?.role === 'admin'
-  const canManageContent = isAdmin || session?.user?.role === 'content_admin'
+  const canManageContent = hasAnyNotePermission(session?.user)
 
   useEffect(() => {
     if (!session?.token) return
@@ -55,7 +63,7 @@ function App() {
       if (!active) return
       const newNotes = nextNotes.filter((note) => !knownNoteIds.has(note.id || note.title))
       if (initialized && newNotes.length) {
-        setNewUploadCount(Math.min(newNotes.length, 7))
+        setNewUploadCount(Math.min(newNotes.length, 8))
         setNotice(`${newNotes.length} new note${newNotes.length === 1 ? ' is' : 's are'} available.`)
       }
       knownNoteIds = new Set(nextNotes.map((note) => note.id || note.title))
@@ -212,11 +220,11 @@ function App() {
     try { await deleteNote(note.id, session.token); setAdminNotes((current) => current.filter((item) => item.id !== note.id)); setLiveNotes((current) => current.filter((item) => item.id !== note.id)); setNotice('Published note deleted.') } catch (error) { setNotice(error.message) }
   }
 
-  const handleSetContentRole = async (id, role) => {
+  const handleSetContentPermissions = async (id, permissions, fullAdmin) => {
     try {
-      await setUserRole(id, role, session.token)
-      setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, role } : user))
-      setNotice(role === 'content_admin' ? 'Note manager access granted. User must sign in again.' : 'Note manager access removed.')
+      const updated = await setUserPermissions(id, permissions, fullAdmin, session.token)
+      setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, ...updated } : user))
+      setNotice('Access permissions saved. The user must sign in again.')
     } catch (error) { setNotice(error.message) }
   }
 
@@ -244,11 +252,11 @@ function App() {
       <main>
         {view === 'profile' && signedIn ? <ProfileView user={session.user} onSave={handleProfileSave} onBack={() => setView('home')} /> : <>
         <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
-        <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 7)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
+        <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 8)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
         <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
         {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
-        {isAdmin && <ContentAdminManager users={adminUsers} onSetRole={handleSetContentRole} />}
-        {session?.user?.role === 'content_admin' && <div id="admin"><ContentAdminView folders={folders} notes={adminNotes} onCreateNote={handleAdminNote} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} /></div>}
+        {isAdmin && <ContentAdminManager users={adminUsers} onSavePermissions={handleSetContentPermissions} />}
+        {canManageContent && !isAdmin && <div id="admin"><ContentAdminView folders={folders} notes={adminNotes} permissions={session.user.permissions || {}} onCreateNote={handleAdminNote} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onNoteStatus={handleNoteStatus} /></div>}
         </>}
       </main>
 
@@ -279,7 +287,7 @@ function NotesView({ subject, setSubject, search, setSearch, notes, latestUpload
   const availableSubjects = ['All notes', ...new Set(studentFolders.map((folder) => folder.subject))]
   const selectedFolder = studentFolders.find((folder) => folder.subject === subject)
   const filteredNotes = notes.filter((note) => (subject === 'All notes' || (selectedFolder && (note.folderId ? note.folderId === selectedFolder.id : note.subject === subject))) && `${note.title} ${note.subject}`.toLowerCase().includes(search.toLowerCase()))
-  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 7)
+  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 8)
   return <section className="page-width app-page">
     <div className="view-heading"><div><span className="eyebrow">The library / 01</span><h1>Find your<br /><i>unfair advantage.</i></h1></div><span className="year-badge">{studentYear || 'All years'} subject room</span></div>
     {connectionError && <div className="connection-banner" role="alert"><span><strong>Connection interrupted</strong>{connectionError}</span><button className="button button-dark" onClick={onRetry}>Try again</button></div>}
@@ -287,7 +295,7 @@ function NotesView({ subject, setSubject, search, setSearch, notes, latestUpload
     <div className="upload-rule"><UploadCloud size={18} /><span>Folders and subjects are organized by your year. Share a note through the public drop at the bottom of this page.</span></div>
     <div className="toolbar"><div className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes, subjects..." /></div><div className="subject-tabs">{availableSubjects.length > 1 ? availableSubjects.map((item) => <button className={subject === item ? 'subject-tab selected' : 'subject-tab'} key={item} onClick={() => setSubject(item)}>{item}</button>) : <span className="panel-caption">No subject folders yet for this year.</span>}</div></div>
     <div className="notes-list">{visibleNotes.map((note) => <NoteCard key={note.id || note.title} note={note} list onAccess={onNoteAccess} />)}{filteredNotes.length === 0 && <div className="empty-state">No approved notes match that search yet.</div>}</div>
-    {filteredNotes.length > 7 && <button className="list-toggle notes-list-toggle" onClick={() => setShowAllNotes((shown) => !shown)}>{showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`} <ChevronDown size={15} className={showAllNotes ? 'list-toggle-open' : ''} /></button>}
+    {filteredNotes.length > 8 && <button className="list-toggle notes-list-toggle" onClick={() => setShowAllNotes((shown) => !shown)}>{showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`} <ChevronDown size={15} className={showAllNotes ? 'list-toggle-open' : ''} /></button>}
   </section>
 }
 
@@ -556,37 +564,57 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
   </div>
 }
 
-function ContentAdminManager({ users, onSetRole }) {
+function ContentAdminManager({ users, onSavePermissions }) {
   const [userFilter, setUserFilter] = useState('')
   const [showAllEligible, setShowAllEligible] = useState(false)
-  const eligibleUsers = users.filter((user) => user.role !== 'admin' && userMatchesQuery(user, userFilter))
+  const eligibleUsers = users.filter((user) => userMatchesQuery(user, userFilter))
   const visibleEligibleUsers = showAllEligible ? eligibleUsers : eligibleUsers.slice(0, 7)
   return <section className="page-width app-page">
     <div className="admin-panel">
       <div className="panel-title"><span>Note manager access</span><ShieldCheck size={17} /></div>
-      <p className="panel-help">Grant note upload and editing access without user, folder, or export controls.</p>
+      <p className="panel-help">Choose note-only capabilities or grant full administration access.</p>
       <div className="search-box"><Search size={17} /><input type="search" value={userFilter} onChange={(event) => setUserFilter(event.target.value)} placeholder="Find user by name, email, college, year, branch, or role" /></div>
-      {visibleEligibleUsers.map((user) => <div className="manage-row" key={user.id}>
-        <span><b>{user.name || 'Unnamed user'}</b><small>{user.email} · {user.role}</small></span>
-        <button className="button compact-button" disabled={user.blocked} onClick={() => onSetRole(user.id, user.role === 'content_admin' ? 'student' : 'content_admin')}>
-          {user.role === 'content_admin' ? 'Remove access' : 'Grant access'}
-        </button>
-      </div>)}
+      {visibleEligibleUsers.map((user) => <UserPermissionEditor key={user.id} user={user} onSave={onSavePermissions} />)}
       {eligibleUsers.length === 0 && <div className="empty-state">No users match this search.</div>}
       {eligibleUsers.length > 7 && <button className="list-toggle" onClick={() => setShowAllEligible((shown) => !shown)}>{showAllEligible ? 'Show fewer users' : `Show all ${eligibleUsers.length} users`} <ChevronDown size={15} className={showAllEligible ? 'list-toggle-open' : ''} /></button>}
     </div>
   </section>
 }
 
-function ContentAdminView({ folders, notes, onCreateNote, onEditNote, onDeleteNote }) {
+function UserPermissionEditor({ user, onSave }) {
+  const legacyNoteManager = user.role === 'content_admin'
+  const currentUserId = JSON.parse(localStorage.getItem('tech-titan-session') || 'null')?.user?.id
+  const cannotRevokeOwnAdmin = user.id === currentUserId && user.role === 'admin'
+  const [permissions, setPermissions] = useState(() => Object.fromEntries(notePermissionOptions.map(({ key }) => [key, legacyNoteManager || user.permissions?.[key] === true])))
+  const [fullAdmin, setFullAdmin] = useState(user.role === 'admin')
+  const [saving, setSaving] = useState(false)
+  const save = async () => {
+    setSaving(true)
+    try { await onSave(user.id, permissions, fullAdmin) } finally { setSaving(false) }
+  }
+
+  return <div className="permission-row">
+    <div className="permission-user"><b>{user.name || 'Unnamed user'}</b><small>{user.email} · {user.role}{user.blocked ? ' · blocked' : ''}</small></div>
+    <div className="permission-options">
+      {notePermissionOptions.map(({ key, label }) => <label key={key}><input type="checkbox" checked={permissions[key]} disabled={fullAdmin || user.blocked} onChange={(event) => setPermissions((current) => ({ ...current, [key]: event.target.checked }))} />{label}</label>)}
+      <label className="full-admin-option"><input type="checkbox" checked={fullAdmin} disabled={user.blocked || cannotRevokeOwnAdmin} onChange={(event) => setFullAdmin(event.target.checked)} /><span><b>Full admin access</b><small>{cannotRevokeOwnAdmin ? 'Your own full-admin access cannot be removed here.' : 'Users, folders, exports, and all note controls'}</small></span></label>
+    </div>
+    <button className="button button-dark permission-save" disabled={saving || user.blocked} onClick={save}>{saving ? 'Saving…' : 'Save permissions'} <Check size={15} /></button>
+  </div>
+}
+
+function ContentAdminView({ folders, notes, permissions, onCreateNote, onEditNote, onDeleteNote, onNoteStatus }) {
+  const currentUser = JSON.parse(localStorage.getItem('tech-titan-session') || 'null')?.user
+  const effectivePermissions = Object.fromEntries(notePermissionOptions.map(({ key }) => [key, hasNotePermission(currentUser, key)]))
+  const canUpload = effectivePermissions.uploadNotes
   return <section className="page-width app-page content-admin-view">
     <div className="view-heading"><div><span className="eyebrow">Content admin / 03</span><h1>Manage the<br /><i>notes room.</i></h1></div></div>
-    <div className="admin-workspace"><div className="admin-panel">
+    {canUpload && <div className="admin-workspace"><div className="admin-panel">
       <div className="panel-title"><span>Publish a note</span><UploadCloud size={17} /></div>
       <p className="panel-help">Upload notes to an existing year and subject folder.</p>
       <AdminNoteForm folders={folders} onSubmit={onCreateNote} />
-    </div></div>
-    <AdminManageContent folders={[]} notes={notes} onEditNote={onEditNote} onDeleteNote={onDeleteNote} />
+    </div></div>}
+    <AdminManageContent folders={[]} notes={notes} permissions={effectivePermissions} onEditNote={onEditNote} onDeleteNote={onDeleteNote} onNoteStatus={onNoteStatus} />
   </section>
 }
 
@@ -617,9 +645,12 @@ function AdminNoteForm({ folders, onSubmit }) {
   </form>
 }
 
-function AdminManageContent({ folders, notes, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote }) {
+function AdminManageContent({ folders, notes, permissions = {}, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote, onNoteStatus }) {
   const session = JSON.parse(localStorage.getItem('tech-titan-session') || 'null')
   const isAdmin = session?.user?.role === 'admin'
+  const canEditNotes = isAdmin || session?.user?.role === 'content_admin' || permissions.editNotes === true
+  const canDeleteNotes = isAdmin || session?.user?.role === 'content_admin' || permissions.deleteNotes === true
+  const canReviewNotes = isAdmin || session?.user?.role === 'content_admin' || permissions.reviewNotes === true
   const [editingNote, setEditingNote] = useState(null)
   const [folderSearch, setFolderSearch] = useState('')
   const [noteSearch, setNoteSearch] = useState('')
@@ -640,7 +671,7 @@ function AdminManageContent({ folders, notes, onEditFolder, onDeleteFolder, onEd
     </section>}
     <section className="admin-panel"><div className="panel-title"><span>Manage published content</span><Settings2 size={17} /></div>
       <div className="search-box management-search"><Search size={16} /><input type="search" value={noteSearch} onChange={(event) => setNoteSearch(event.target.value)} placeholder="Search notes by title, subject, or status" /></div>
-      {visibleNotes.map((note) => <div className="manage-row" key={note.id}><span><b>{note.title}</b><small>{note.year} · {note.subject} · {note.status}</small></span><button className="button compact-button" onClick={() => setEditingNote(note)}>Edit</button><button className="button compact-button danger-button" onClick={() => onDeleteNote(note)}>Delete</button></div>)}
+      {visibleNotes.map((note) => <div className="manage-row" key={note.id}><span><b>{note.title}</b><small>{note.year} · {note.subject} · {note.status}</small></span>{note.status === 'pending' && canReviewNotes && <><button className="button compact-button" onClick={() => onNoteStatus(note.id, 'approved')}>Approve</button><button className="button compact-button danger-button" onClick={() => onNoteStatus(note.id, 'rejected')}>Reject</button></>}{canEditNotes && <button className="button compact-button" onClick={() => setEditingNote(note)}>Edit</button>}{canDeleteNotes && <button className="button compact-button danger-button" onClick={() => onDeleteNote(note)}>Delete</button>}</div>)}
       {filteredNotes.length === 0 && <div className="empty-state">{notes.length ? 'No notes match this search.' : 'No published or submitted notes yet.'}</div>}
       {filteredNotes.length > 7 && <button className="list-toggle" onClick={() => setShowAllNotes((shown) => !shown)}>{showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`} <ChevronDown size={15} className={showAllNotes ? 'list-toggle-open' : ''} /></button>}
     </section>

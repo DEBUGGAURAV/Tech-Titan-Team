@@ -36,6 +36,12 @@ const toIso = (value) => value?.toDate?.().toISOString() || (typeof value === 's
 const userActivityCollection = (userId) => db.collection('users').doc(userId).collection('activity')
 const adminActionsCollection = () => db.collection('adminActions')
 const deletedAccountsCollection = () => db.collection('deletedAccounts')
+const describeNotePermissions = (user) => {
+  if (user.role === 'admin') return 'Full admin'
+  if (user.role === 'content_admin') return 'Upload, edit, delete, review'
+  const labels = { uploadNotes: 'Upload', editNotes: 'Edit', deleteNotes: 'Delete', reviewNotes: 'Review' }
+  return notePermissionNames.filter((permission) => user.permissions?.[permission] === true).map((permission) => labels[permission]).join(', ')
+}
 const createActivityRecord = (event, req, details = {}) => ({
   event,
   ipAddress: req.ip || '',
@@ -91,7 +97,9 @@ const authRequired = async (req, res, next) => {
 }
 
 const adminRequired = (req, res, next) => req.user?.role === 'admin' ? next() : res.status(403).json({ message: 'Admin access required.' })
-const contentAdminRequired = (req, res, next) => ['admin', 'content_admin'].includes(req.user?.role) ? next() : res.status(403).json({ message: 'Content admin access required.' })
+const notePermissionNames = ['uploadNotes', 'editNotes', 'deleteNotes', 'reviewNotes']
+const hasNotePermission = (user, permission) => user?.role === 'admin' || user?.role === 'content_admin' || user?.permissions?.[permission] === true
+const hasAnyNotePermission = (user) => notePermissionNames.some((permission) => hasNotePermission(user, permission))
 const serialize = (snapshot) => ({ id: snapshot.id, ...snapshot.data() })
 
 app.get('/api/notes', authRequired, async (_req, res) => {
@@ -108,26 +116,34 @@ app.post('/api/notes/:id/access', authRequired, async (req, res) => {
 app.post('/api/notes', authRequired, async (req, res) => {
   const { title, subject, year, folderId, driveLink, status } = req.body
   if (!title || !subject || !year || !driveLink) return res.status(400).json({ message: 'Title, year, subject, and Drive link are required.' })
-  if (['admin', 'content_admin'].includes(req.user.role)) {
+  const canPublish = hasNotePermission(req.user, 'uploadNotes')
+  if (canPublish) {
     if (!folderId) return res.status(400).json({ message: 'Choose a subject folder for this note.' })
     const folderSnapshot = await db.collection('folders').doc(folderId).get()
     const folder = folderSnapshot.data()
     if (!folderSnapshot.exists || folder.year !== year || folder.subject !== subject) return res.status(400).json({ message: 'The selected folder does not match this note year and subject.' })
   }
-  const note = { title, subject, year, folderId: folderId || '', driveLink, author: req.user.name || req.user.email, authorId: req.user.id, status: ['admin', 'content_admin'].includes(req.user.role) && status === 'approved' ? 'approved' : 'pending', createdAt: FieldValue.serverTimestamp() }
+  const note = { title, subject, year, folderId: folderId || '', driveLink, author: req.user.name || req.user.email, authorId: req.user.id, status: canPublish && status === 'approved' ? 'approved' : 'pending', createdAt: FieldValue.serverTimestamp() }
   const created = await db.collection('notes').add(note)
   res.status(201).json({ id: created.id, ...note, createdAt: new Date().toISOString() })
 })
-app.patch('/api/notes/:id', authRequired, contentAdminRequired, async (req, res) => {
-  if (req.user.role === 'content_admin') {
-    const editableFields = ['title', 'driveLink']
-    const body = req.body && typeof req.body === 'object' ? req.body : {}
-    if (Object.keys(body).some((field) => !editableFields.includes(field)) || typeof body.title !== 'string' || !body.title.trim() || typeof body.driveLink !== 'string' || !body.driveLink.trim()) {
-      return res.status(400).json({ message: 'Content admins can edit only a note title and Drive link.' })
-    }
+app.patch('/api/notes/:id', authRequired, async (req, res) => {
+  const changes = req.body && typeof req.body === 'object' ? { ...req.body } : {}
+  const fields = Object.keys(changes)
+  const contentFields = fields.filter((field) => field !== 'status')
+  if (contentFields.length && !hasNotePermission(req.user, 'editNotes')) return res.status(403).json({ message: 'Note edit access required.' })
+  if ('status' in changes && !['approved', 'rejected'].includes(changes.status)) return res.status(400).json({ message: 'Choose approved or rejected note status.' })
+  if ('status' in changes && !hasNotePermission(req.user, 'reviewNotes')) return res.status(403).json({ message: 'Note review access required.' })
+  if (req.user.role !== 'admin' && contentFields.some((field) => !['title', 'driveLink'].includes(field))) {
+    return res.status(400).json({ message: 'This role can edit only a note title and Drive link.' })
   }
-  const changes = { ...req.body }
+  if ('title' in changes && (typeof changes.title !== 'string' || !changes.title.trim())) return res.status(400).json({ message: 'Enter a note title.' })
+  if ('driveLink' in changes && (typeof changes.driveLink !== 'string' || !changes.driveLink.trim())) return res.status(400).json({ message: 'Enter a valid Drive link.' })
+  if (contentFields.some((field) => !['title', 'driveLink', 'folderId', 'subject', 'year'].includes(field))) {
+    return res.status(400).json({ message: 'Unsupported note fields were provided.' })
+  }
   if ('folderId' in changes || 'subject' in changes || 'year' in changes) {
+    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Only full admins can move notes between folders.' })
     if (typeof changes.folderId !== 'string' || !changes.folderId) return res.status(400).json({ message: 'Choose a subject folder for this note.' })
     const folderSnapshot = await db.collection('folders').doc(changes.folderId).get()
     if (!folderSnapshot.exists) return res.status(400).json({ message: 'The selected folder no longer exists.' })
@@ -138,13 +154,16 @@ app.patch('/api/notes/:id', authRequired, contentAdminRequired, async (req, res)
   await db.collection('notes').doc(req.params.id).update(changes)
   res.json({ id: req.params.id, ...changes })
 })
-app.delete('/api/notes/:id', authRequired, contentAdminRequired, async (req, res) => {
+app.delete('/api/notes/:id', authRequired, async (req, res) => {
+  if (!hasNotePermission(req.user, 'deleteNotes')) return res.status(403).json({ message: 'Note deletion access required.' })
   await db.collection('notes').doc(req.params.id).delete()
   res.json({ id: req.params.id, deleted: true })
 })
-app.get('/api/admin/notes', authRequired, contentAdminRequired, async (_req, res) => {
+app.get('/api/admin/notes', authRequired, async (req, res) => {
+  if (!hasAnyNotePermission(req.user)) return res.status(403).json({ message: 'Note management access required.' })
   const snapshot = await db.collection('notes').orderBy('createdAt', 'desc').get()
-  res.json(snapshot.docs.map(serialize))
+  const canViewAll = req.user.role === 'admin' || req.user.role === 'content_admin' || hasNotePermission(req.user, 'editNotes') || hasNotePermission(req.user, 'deleteNotes') || hasNotePermission(req.user, 'reviewNotes')
+  res.json(snapshot.docs.filter((note) => canViewAll || note.data().authorId === req.user.id).map(serialize))
 })
 app.get('/api/folders', authRequired, async (_req, res) => {
   const snapshot = await db.collection('folders').get()
@@ -243,15 +262,29 @@ app.patch('/api/admin/users/:id/block', authRequired, adminRequired, async (req,
   await batch.commit()
   res.json({ id: userSnapshot.id, blocked })
 })
-app.patch('/api/admin/users/:id/role', authRequired, adminRequired, async (req, res) => {
-  const { role } = req.body
-  if (!['student', 'content_admin'].includes(role)) return res.status(400).json({ message: 'Choose student or content admin access.' })
+app.patch('/api/admin/users/:id/permissions', authRequired, adminRequired, async (req, res) => {
+  const incomingPermissions = req.body?.permissions || {}
+  const fullAdmin = req.body?.fullAdmin === true
+  if (!incomingPermissions || typeof incomingPermissions !== 'object' || Array.isArray(incomingPermissions) || Object.keys(incomingPermissions).some((key) => !notePermissionNames.includes(key) || typeof incomingPermissions[key] !== 'boolean')) {
+    return res.status(400).json({ message: 'Choose valid note permissions.' })
+  }
+  const permissions = Object.fromEntries(notePermissionNames.map((permission) => [permission, fullAdmin ? false : incomingPermissions[permission] === true]))
   const userRef = db.collection('users').doc(req.params.id)
   const snapshot = await userRef.get()
   if (!snapshot.exists) return res.status(404).json({ message: 'User not found.' })
-  if (snapshot.data().role === 'admin') return res.status(400).json({ message: 'Full admin roles cannot be changed here.' })
-  await userRef.update({ role })
-  res.json({ id: req.params.id, role })
+  const currentUser = snapshot.data()
+  const role = fullAdmin ? 'admin' : Object.values(permissions).some(Boolean) ? 'note_manager' : 'student'
+  if (snapshot.id === req.user.id && currentUser.role === 'admin' && role !== 'admin') return res.status(400).json({ message: 'You cannot remove your own full admin access.' })
+  if (currentUser.role === 'admin' && role !== 'admin') {
+    const admins = await db.collection('users').where('role', '==', 'admin').get()
+    if (admins.size <= 1) return res.status(400).json({ message: 'At least one full admin account must remain.' })
+  }
+  const actionRef = adminActionsCollection().doc()
+  const batch = db.batch()
+  batch.update(userRef, { role, permissions })
+  batch.set(actionRef, { ...createAdminAction(req, { id: snapshot.id, ...currentUser }, 'user_permissions_updated'), permissions, fullAdmin, status: 'completed' })
+  await batch.commit()
+  res.json({ id: snapshot.id, role, permissions })
 })
 app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
   if (req.params.id === req.user.id) return res.status(400).json({ message: 'You cannot delete your own admin account.' })
@@ -273,7 +306,7 @@ app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res)
 app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res) => {
   const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
   const users = snapshot.docs.map(serialize)
-  const rows = users.map((user) => ({ Name: user.name || '', Email: user.email || '', 'Mobile Number': user.mobile || '', College: user.college || '', Year: user.year || '', Branch: user.branch || '', Role: user.role || 'student', Blocked: user.blocked ? 'Yes' : 'No' }))
+  const rows = users.map((user) => ({ Name: user.name || '', Email: user.email || '', 'Mobile Number': user.mobile || '', College: user.college || '', Year: user.year || '', Branch: user.branch || '', Role: user.role || 'student', 'Note Permissions': describeNotePermissions(user), Blocked: user.blocked ? 'Yes' : 'No' }))
   const notesSnapshot = await db.collection('notes').orderBy('createdAt', 'desc').get()
   const noteRows = notesSnapshot.docs.map((noteSnapshot) => {
     const note = noteSnapshot.data()
@@ -313,6 +346,8 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
       'Target Mobile': action.targetMobile || '',
       'Target User ID': action.targetUserId || '',
       'IP Address': action.ipAddress || '',
+      'Note Permissions': action.permissions ? describeNotePermissions({ role: action.fullAdmin ? 'admin' : 'note_manager', permissions: action.permissions }) : '',
+      'Full Admin Access': action.fullAdmin ? 'Yes' : 'No',
       'Action Time': toIso(action.occurredAt),
       'Completed Time': toIso(action.completedAt),
     }
@@ -365,7 +400,7 @@ app.post('/api/auth/signin', async (req, res) => {
   if (user.blocked) return res.status(403).json({ message: 'This account is blocked.' })
   await recordUserActivity(userRef.id, req, 'login')
   const token = jwt.sign({ userId: userRef.id, email: user.email }, process.env.JWT_SECRET || 'development-secret')
-  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile || '', college: user.college || '', year: user.year || '', branch: user.branch || '', role: user.role, blocked: false } })
+  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile || '', college: user.college || '', year: user.year || '', branch: user.branch || '', role: user.role, permissions: user.permissions || {}, blocked: false } })
 })
 
 app.post('/api/auth/logout', authRequired, async (req, res) => {
@@ -442,7 +477,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   await registrationBatch.commit()
   const responseUser = { id: userRef.id, ...user, createdAt: undefined }
   const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, process.env.JWT_SECRET || 'development-secret')
-  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile, college: user.college, year: user.year, branch: user.branch, role: user.role, blocked: false } })
+  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile, college: user.college, year: user.year, branch: user.branch, role: user.role, permissions: user.permissions || {}, blocked: false } })
 })
 
 app.patch('/api/me', authRequired, async (req, res) => {
