@@ -4,7 +4,14 @@ import {
   GraduationCap, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Pencil, Plus,
   Search, Settings2, ShieldCheck, Sparkles, UploadCloud, Users, X, Zap,
 } from 'lucide-react'
-import { changePassword, createFolder, createNote, deleteAdminUser, deleteAllAdminUsers, deleteFolder, deleteNote, forgotPassword, getAdminNotes, getAdminUserDetails, getAdminUsers, getExportUrl, getFolders, getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword, setUserBlocked, setUserPermissions, signIn, signUp, updateAdminUser, updateFolder, updateNote, updateProfile, verifySignupCode } from './api'
+import {
+  changePassword, createFolder, createNote, createNotice, deleteAdminUser,
+  deleteAllAdminUsers, deleteFolder, deleteNote, forgotPassword, getAdminNotes,
+  getAdminUserDetails, getAdminUsers, getExportUrl, getFolders, getNotices,
+  getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword,
+  setUserBlocked, setUserPermissions, signIn, signUp, updateAdminUser,
+  updateFolder, updateNote, updateProfile, verifySignupCode,
+} from './api'
 
 const years = ['1st year', '2nd year', '3rd year', '4th year']
 const subjects = ['Data Structures', 'Database Systems', 'Operating Systems', 'Web Development']
@@ -46,6 +53,7 @@ function App() {
   const [folders, setFolders] = useState([])
   const [adminUsers, setAdminUsers] = useState([])
   const [adminNotes, setAdminNotes] = useState([])
+  const [noticeBoard, setNoticeBoard] = useState([])
   const [notice, setNotice] = useState('')
   const [newUploadCount, setNewUploadCount] = useState(0)
   const [connectionError, setConnectionError] = useState('')
@@ -55,7 +63,10 @@ function App() {
   const canManageContent = hasAnyNotePermission(session?.user)
 
   useEffect(() => {
-    if (!session?.token) return
+    if (!session?.token) {
+      setNoticeBoard([])
+      return
+    }
     let active = true
     let initialized = false
     let knownNoteIds = new Set()
@@ -76,8 +87,19 @@ function App() {
       if (active && error.code === 'API_UNREACHABLE') setConnectionError(error.message)
       })
     }
+    const refreshNoticeBoard = () => {
+      getNotices(session.token).then((nextNotices) => {
+        if (active) setNoticeBoard(nextNotices)
+      }).catch(() => {
+        if (active) setNoticeBoard([])
+      })
+    }
     refreshNotes()
-    const refreshTimer = window.setInterval(refreshNotes, 30000)
+    refreshNoticeBoard()
+    const refreshTimer = window.setInterval(() => {
+      refreshNotes()
+      refreshNoticeBoard()
+    }, 30000)
     document.addEventListener('visibilitychange', refreshNotes)
     getFolders(session.token).then(setFolders).catch(() => setFolders([]))
     if (isAdmin) getAdminUsers(session.token).then(setAdminUsers).catch(() => setAdminUsers([]))
@@ -235,6 +257,18 @@ function App() {
     } catch (error) { setNotice(error.message) }
   }
 
+  const handleCreateNotice = async ({ title, message }) => {
+    try {
+      const created = await createNotice({ title, message, type: 'general' }, session.token)
+      setNoticeBoard((current) => [created, ...current])
+      setNotice('Notice published to the board.')
+      return true
+    } catch (error) {
+      setNotice(error.message)
+      return false
+    }
+  }
+
   const handleDeleteAllUsers = async () => {
     const count = adminUsers.filter((user) => user.role !== 'admin').length
     if (!count || !window.confirm(`Permanently delete all ${count} non-admin users? Their activity will be archived in the export.`)) return
@@ -271,6 +305,7 @@ function App() {
         <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
         <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 8)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
         <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
+        {signedIn && <NoticeBoard notices={noticeBoard} canManage={canManageContent || isAdmin} onCreateNotice={handleCreateNotice} />}
         {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onDeleteAll={handleDeleteAllUsers} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
         {isAdmin && <ContentAdminManager users={adminUsers} onSavePermissions={handleSetContentPermissions} />}
         {canManageContent && !isAdmin && <div id="admin"><ContentAdminView folders={folders} notes={adminNotes} permissions={session.user.permissions || {}} onCreateNote={handleAdminNote} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onNoteStatus={handleNoteStatus} /></div>}
@@ -471,6 +506,36 @@ function LegacyAdminView({ users, notes, folders, token, onCreateFolder, onCreat
         <button className="button compact-button" onClick={() => onBlock(user.id, !user.blocked)}>{user.blocked ? 'Unblock' : 'Block'}</button>
         <button className="button compact-button danger-button" onClick={() => { if (window.confirm(`Delete ${user.name || user.email}?`)) onDelete(user.id) }}>Delete</button>
       </div>)}
+    </div>
+  </section>
+}
+
+function NoticeBoard({ notices, canManage, onCreateNotice }) {
+  const [draft, setDraft] = useState({ title: '', message: '' })
+  const submit = async (event) => {
+    event.preventDefault()
+    if (!draft.title.trim() || !draft.message.trim()) return
+    const saved = await onCreateNotice({ title: draft.title.trim(), message: draft.message.trim() })
+    if (saved) setDraft({ title: '', message: '' })
+  }
+
+  return <section className="page-width app-page">
+    <div className="view-heading"><div><span className="eyebrow">Notice board</span><h1>Team updates &nbsp;<i>in one place.</i></h1></div></div>
+    {canManage && <div className="admin-panel" style={{ marginBottom: '18px' }}>
+      <div className="panel-title"><span>Publish notice</span><Sparkles size={17} /></div>
+      <form className="admin-form" onSubmit={submit}>
+        <label className="modal-label">Title<input required value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} placeholder="e.g. New note upload" /></label>
+        <label className="modal-label">Message<textarea required rows={4} value={draft.message} onChange={(event) => setDraft((current) => ({ ...current, message: event.target.value }))} placeholder="Share an update, reminder, or announcement for students and admins." /></label>
+        <button className="button button-dark full" type="submit"><Sparkles size={16} /> Post notice</button>
+      </form>
+    </div>}
+    <div className="notice-board-list">
+      {notices.length ? notices.map((notice) => <article className="notice-card" key={notice.id}>
+        <div className="notice-card-top"><span className="review-pill">{notice.type || 'general'}</span><small>{notice.createdAt ? new Date(notice.createdAt).toLocaleDateString() : 'Recent'}</small></div>
+        <h3>{notice.title}</h3>
+        <p>{notice.message}</p>
+        <small className="notice-meta">Posted by {notice.createdByName || 'Admin'} · expires in {Math.max(1, Math.ceil((Number(notice.expiresAt || 0) - Date.now()) / 86400000))} day(s)</small>
+      </article>) : <div className="empty-state">No active notices yet. Admin updates will appear here.</div>}
     </div>
   </section>
 }

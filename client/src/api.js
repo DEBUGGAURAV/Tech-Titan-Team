@@ -27,6 +27,8 @@ export const forgotPassword = (email) => request('/auth/forgot-password', { meth
 export const resetPassword = (token, password) => request('/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, password }) })
 export const getNotes = (token) => request('/notes', {}, token)
 export const createNote = (note, token) => request('/notes', { method: 'POST', body: JSON.stringify(note) }, token)
+export const getNotices = (token) => request('/notices', {}, token)
+export const createNotice = (notice, token) => request('/notices', { method: 'POST', body: JSON.stringify(notice) }, token)
 export const getFolders = (token) => request('/folders', {}, token)
 export const createFolder = (folder, token) => request('/folders', { method: 'POST', body: JSON.stringify(folder) }, token)
 export const updateFolder = (id, changes, token) => request(`/folders/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }, token)

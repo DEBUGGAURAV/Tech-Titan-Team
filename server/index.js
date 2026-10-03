@@ -26,8 +26,15 @@ const firebaseApp = getApps().length ? getApps()[0] : initializeApp({
 })
 const db = getFirestore(firebaseApp)
 const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean))
+const noticeBoardCollection = () => db.collection('noticeBoard')
+const noticeExpiryMs = 15 * 24 * 60 * 60 * 1000
 const studentYears = ['1st year', '2nd year', '3rd year', '4th year']
 const normalizeMobile = (value) => typeof value === 'string' ? value.trim() : ''
+const isProtectedAdminEmail = (email) => {
+  const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : ''
+  const primaryAdmin = (process.env.ADMIN_EMAIL || '').trim().toLowerCase()
+  return Boolean(normalizedEmail) && (normalizedEmail === primaryAdmin || adminEmails.has(normalizedEmail))
+}
 const isValidMobile = (value) => {
   const mobile = normalizeMobile(value)
   const digitCount = (mobile.match(/\d/g) || []).length
@@ -43,6 +50,33 @@ const describeNotePermissions = (user) => {
   const labels = { uploadNotes: 'Upload', editNotes: 'Edit', deleteNotes: 'Delete', reviewNotes: 'Review' }
   return notePermissionNames.filter((permission) => user.permissions?.[permission] === true).map((permission) => labels[permission]).join(', ')
 }
+const createNoticeRecord = async ({ title, message, type = 'general', createdBy, createdByName, createdByRole, relatedNoteId = '' }) => {
+  const safeTitle = String(title || '').trim()
+  const safeMessage = String(message || '').trim()
+  if (!safeTitle || !safeMessage) return null
+  const payload = {
+    title: safeTitle.slice(0, 120),
+    message: safeMessage.slice(0, 1000),
+    type: ['general', 'note', 'update'].includes(type) ? type : 'general',
+    createdBy: createdBy || '',
+    createdByName: createdByName || '',
+    createdByRole: createdByRole || 'admin',
+    relatedNoteId: relatedNoteId || '',
+    createdAt: FieldValue.serverTimestamp(),
+    expiresAt: Date.now() + noticeExpiryMs,
+  }
+  const created = await noticeBoardCollection().add(payload)
+  return { id: created.id, ...payload, expiresAt: payload.expiresAt, createdAt: new Date().toISOString() }
+}
+const pruneExpiredNotices = async () => {
+  const expiredSnapshot = await noticeBoardCollection().where('expiresAt', '<=', Date.now()).get()
+  if (expiredSnapshot.empty) return 0
+  const batch = db.batch()
+  expiredSnapshot.docs.forEach((snapshot) => batch.delete(snapshot.ref))
+  await batch.commit()
+  return expiredSnapshot.size
+}
+const canManageNoticeBoard = (user) => Boolean(user) && (user.role === 'admin' || user.role === 'content_admin' || hasAnyNotePermission(user))
 const createActivityRecord = (event, req, details = {}) => ({
   event,
   ipAddress: req.ip || '',
@@ -126,6 +160,17 @@ app.post('/api/notes', authRequired, async (req, res) => {
   }
   const note = { title, subject, year, folderId: folderId || '', driveLink, author: req.user.name || req.user.email, authorId: req.user.id, status: canPublish && status === 'approved' ? 'approved' : 'pending', createdAt: FieldValue.serverTimestamp() }
   const created = await db.collection('notes').add(note)
+  if (note.status === 'approved') {
+    await createNoticeRecord({
+      title: 'New note added',
+      message: `${note.title} was published in ${note.subject} (${note.year}).`,
+      type: 'note',
+      createdBy: req.user.id,
+      createdByName: req.user.name || req.user.email || 'Admin',
+      createdByRole: req.user.role || 'admin',
+      relatedNoteId: created.id,
+    })
+  }
   res.status(201).json({ id: created.id, ...note, createdAt: new Date().toISOString() })
 })
 app.patch('/api/notes/:id', authRequired, async (req, res) => {
@@ -152,7 +197,29 @@ app.patch('/api/notes/:id', authRequired, async (req, res) => {
     changes.subject = folderSnapshot.data().subject
     changes.year = folderSnapshot.data().year
   }
+  const existingNote = await db.collection('notes').doc(req.params.id).get()
   await db.collection('notes').doc(req.params.id).update(changes)
+  if (changes.status === 'approved' && existingNote.exists) {
+    await createNoticeRecord({
+      title: 'New note updated',
+      message: `${existingNote.data().title || 'A note'} was approved and is now live in ${existingNote.data().subject || 'the library'} (${existingNote.data().year || 'general'}).`,
+      type: 'note',
+      createdBy: req.user.id,
+      createdByName: req.user.name || req.user.email || 'Admin',
+      createdByRole: req.user.role || 'admin',
+      relatedNoteId: req.params.id,
+    })
+  } else if (Object.keys(changes).some((key) => ['title', 'driveLink', 'subject', 'year', 'folderId'].includes(key)) && existingNote.exists) {
+    await createNoticeRecord({
+      title: 'Note updated',
+      message: `${existingNote.data().title || 'A note'} was updated by ${req.user.name || req.user.email || 'an admin'}.`,
+      type: 'update',
+      createdBy: req.user.id,
+      createdByName: req.user.name || req.user.email || 'Admin',
+      createdByRole: req.user.role || 'admin',
+      relatedNoteId: req.params.id,
+    })
+  }
   res.json({ id: req.params.id, ...changes })
 })
 app.delete('/api/notes/:id', authRequired, async (req, res) => {
@@ -170,6 +237,32 @@ app.get('/api/folders', authRequired, async (_req, res) => {
   const snapshot = await db.collection('folders').get()
   const folders = snapshot.docs.map(serialize)
   res.json(folders.sort((left, right) => `${left.year}${left.subject}`.localeCompare(`${right.year}${right.subject}`)))
+})
+app.get('/api/notices', authRequired, async (_req, res) => {
+  await pruneExpiredNotices()
+  const snapshot = await noticeBoardCollection().orderBy('createdAt', 'desc').get()
+  const notices = snapshot.docs
+    .map((doc) => ({ id: doc.id, ...doc.data(), expiresAt: typeof doc.data().expiresAt === 'number' ? doc.data().expiresAt : Date.now() + noticeExpiryMs }))
+    .filter((notice) => (notice.expiresAt || Date.now()) > Date.now())
+    .sort((left, right) => Number(right.expiresAt || 0) - Number(left.expiresAt || 0))
+  res.json(notices)
+})
+app.post('/api/notices', authRequired, async (req, res) => {
+  if (!canManageNoticeBoard(req.user)) return res.status(403).json({ message: 'Notice board management access required.' })
+  const { title, message, type, relatedNoteId } = req.body || {}
+  if (typeof title !== 'string' || !title.trim()) return res.status(400).json({ message: 'Notice title is required.' })
+  if (typeof message !== 'string' || !message.trim()) return res.status(400).json({ message: 'Notice details are required.' })
+  const notice = await createNoticeRecord({
+    title,
+    message,
+    type,
+    relatedNoteId,
+    createdBy: req.user.id,
+    createdByName: req.user.name || req.user.email || 'Admin',
+    createdByRole: req.user.role || 'admin',
+  })
+  if (!notice) return res.status(400).json({ message: 'Notice could not be created.' })
+  res.status(201).json(notice)
 })
 app.post('/api/folders', authRequired, adminRequired, async (req, res) => {
   const { subject, year } = req.body
@@ -287,6 +380,9 @@ app.patch('/api/admin/users/:id/permissions', authRequired, adminRequired, async
   const currentUser = snapshot.data()
   const role = fullAdmin ? 'admin' : Object.values(permissions).some(Boolean) ? 'note_manager' : 'student'
   if (snapshot.id === req.user.id && currentUser.role === 'admin' && role !== 'admin') return res.status(400).json({ message: 'You cannot remove your own full admin access.' })
+  if (isProtectedAdminEmail(currentUser.email) && role !== 'admin' && req.user.email?.toLowerCase() !== (currentUser.email || '').trim().toLowerCase()) {
+    return res.status(403).json({ message: 'The primary admin account is protected and cannot be downgraded by another admin.' })
+  }
   if (currentUser.role === 'admin' && role !== 'admin') {
     const admins = await db.collection('users').where('role', '==', 'admin').get()
     if (admins.size <= 1) return res.status(400).json({ message: 'At least one full admin account must remain.' })
@@ -302,6 +398,9 @@ const archiveAndDeleteUser = async (req, userSnapshot) => {
   const userRef = userSnapshot.ref
   const actionRef = adminActionsCollection().doc()
   const userData = userSnapshot.data()
+  if (isProtectedAdminEmail(userData?.email) && (req.user.email || '').toLowerCase() !== (userData.email || '').trim().toLowerCase()) {
+    throw new Error('The main admin account cannot be removed by another admin.')
+  }
   const { passwordHash, createdAt, ...safeUserData } = userData
   const activitySnapshot = await userActivityCollection(userSnapshot.id).get()
   const archivedActivity = activitySnapshot.docs.map((activitySnapshot) => {
@@ -349,10 +448,11 @@ app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res)
     await archiveAndDeleteUser(req, userSnapshot)
     res.json({ id: req.params.id, deleted: true })
   } catch (error) {
-    res.status(500).json({ message: error.message })
+    res.status(403).json({ message: error.message })
   }
 })
 app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res) => {
+  await pruneExpiredNotices()
   const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
   const users = snapshot.docs.map(serialize)
   const deletedSnapshot = await deletedAccountsCollection().orderBy('deletedAt', 'desc').get()
@@ -453,9 +553,62 @@ app.post('/api/auth/request-otp', async (req, res) => {
       Messages: [{
         From: { Email: process.env.MAILJET_SENDER_EMAIL, Name: 'Tech Titan Team' },
         To: [{ Email: normalizedEmail }],
-        Subject: 'Your Tech Titan Team verification code',
-        TextPart: `Your verification code is ${code}. It expires in 10 minutes.`,
-        HTMLPart: `<h2>Your verification code: ${code}</h2><p>This code expires in 10 minutes.</p>`,
+        Subject: 'Your verification code',
+        TextPart: `Hello,\n\nYour verification code is: ${code}\n\nThis code will expire in 10 minutes.\n\nIf you did not request this code, you can ignore this email.\n\nRegards,\nTech Titan Team`,
+        HTMLPart: `
+          <!DOCTYPE html>
+          <html lang="en">
+            <head>
+              <meta charset="UTF-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+              <title>Verification Code</title>
+            </head>
+            <body style="margin:0; padding:0; background-color:#f4f7fb; font-family:Arial, Helvetica, sans-serif;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f7fb; padding:30px 0;">
+                <tr>
+                  <td align="center">
+                    <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 4px 16px rgba(0,0,0,0.06);">
+                      <tr>
+                        <td style="background:linear-gradient(135deg, #0f172a, #1d4ed8); padding:28px 30px; text-align:center;">
+                          <h1 style="margin:0; color:#ffffff; font-size:28px; font-weight:bold;">Tech Titan</h1>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding:40px 30px 20px 30px; color:#1f2937; font-size:16px; line-height:1.8;">
+                          <p style="margin:0 0 20px 0;">Hello,</p>
+
+                          <p style="margin:0 0 20px 0;">
+                            Your verification code is:
+                          </p>
+
+                          <p style="margin:0 0 25px 0; text-align:center;">
+                            <span style="display:inline-block; background:#eef2ff; color:#1e3a8a; font-size:32px; font-weight:bold; letter-spacing:6px; padding:18px 24px; border-radius:10px; border:1px solid #c7d2fe;">
+                              ${code}
+                            </span>
+                          </p>
+
+                          <p style="margin:0 0 20px 0;">
+                            This code will expire in 10 minutes.
+                          </p>
+
+                          <p style="margin:0;">
+                            If you did not request this code, you can ignore this email.
+                          </p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding:20px 30px 30px 30px; text-align:center; color:#6b7280; font-size:14px;">
+                          Regards,<br />
+                          <strong>Tech Titan Team</strong>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </body>
+          </html>
+        `,
       }],
     })
   } else {
@@ -586,4 +739,13 @@ const ensureAdmin = async () => {
   console.log(`Admin account ready for ${email}`)
 }
 
-ensureAdmin().then(() => app.listen(port, () => console.log(`Tech Titan Team API running on http://localhost:${port}`))).catch((error) => { console.error('Admin bootstrap failed:', error.message); process.exit(1) })
+const startServer = async () => {
+  await ensureAdmin()
+  await pruneExpiredNotices()
+  setInterval(() => {
+    pruneExpiredNotices().catch(() => {})
+  }, 60 * 60 * 1000)
+  app.listen(port, () => console.log(`Tech Titan Team API running on http://localhost:${port}`))
+}
+
+startServer().catch((error) => { console.error('Server bootstrap failed:', error.message); process.exit(1) })
