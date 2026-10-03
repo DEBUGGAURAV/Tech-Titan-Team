@@ -15,12 +15,6 @@ const userMatchesQuery = (user, query) => {
   return !normalizedQuery || [user.name, user.email, user.college, user.year, user.branch, user.role]
     .some((value) => String(value || '').toLowerCase().includes(normalizedQuery))
 }
-const notes = [
-  { title: 'The complete DBMS revision sheet', subject: 'Database Systems', author: 'Aarav Mehta', pages: '18 pages', color: 'coral', type: 'PDF' },
-  { title: 'DSA patterns for placement season', subject: 'Data Structures', author: 'Meera Iyer', pages: '24 pages', color: 'blue', type: 'PDF' },
-  { title: 'Operating systems, made visual', subject: 'Operating Systems', author: 'Kabir Shah', pages: '12 pages', color: 'yellow', type: 'PDF' },
-  { title: 'Build your first MERN project', subject: 'Web Development', author: 'Tanya Rao', pages: '32 pages', color: 'green', type: 'LINK' },
-]
 const students = [
   { name: 'Aarav Mehta', branch: 'Computer Science', year: '3rd year', initials: 'AM', color: 'coral', score: '92%' },
   { name: 'Meera Iyer', branch: 'Information Technology', year: '2nd year', initials: 'MI', color: 'blue', score: '88%' },
@@ -238,7 +232,7 @@ function App() {
       <main>
         {view === 'profile' && signedIn ? <ProfileView user={session.user} onSave={handleProfileSave} onBack={() => setView('home')} /> : <>
         <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
-        <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={[...liveNotes, ...notes].filter((note, index, list) => list.findIndex((item) => item.title === note.title) === index)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
+        <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
         <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
         {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
         {isAdmin && <ContentAdminManager users={adminUsers} onSetRole={handleSetContentRole} />}
@@ -268,11 +262,13 @@ function Home({ onExplore, onSignIn, signedIn }) {
 }
 
 function NotesView({ subject, setSubject, search, setSearch, notes, folders, studentYear, connectionError, onRetry, onNoteAccess }) {
+  const [showAllNotes, setShowAllNotes] = useState(false)
   const studentFolders = folders
   const availableSubjects = ['All notes', ...new Set(studentFolders.map((folder) => folder.subject))]
   const selectedFolder = studentFolders.find((folder) => folder.subject === subject)
-  const visibleNotes = notes.filter((note) => (subject === 'All notes' || (selectedFolder && (note.folderId ? note.folderId === selectedFolder.id : note.subject === subject))) && `${note.title} ${note.subject}`.toLowerCase().includes(search.toLowerCase()))
-  return <section className="page-width app-page"><div className="view-heading"><div><span className="eyebrow">The library / 01</span><h1>Find your<br /><i>unfair advantage.</i></h1></div><span className="year-badge">{studentYear || 'All years'} subject room</span></div>{connectionError && <div className="connection-banner" role="alert"><span><strong>Connection interrupted</strong>{connectionError}</span><button className="button button-dark" onClick={onRetry}>Try again</button></div>}<div className="upload-rule"><UploadCloud size={18} /><span>Folders and subjects are organized by your year. Share a note through the public drop at the bottom of this page.</span></div><div className="toolbar"><div className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes, subjects..." /></div><div className="subject-tabs">{availableSubjects.length > 1 ? availableSubjects.map((item) => <button className={subject === item ? 'subject-tab selected' : 'subject-tab'} key={item} onClick={() => setSubject(item)}>{item}</button>) : <span className="panel-caption">No subject folders yet for this year.</span>}</div></div><div className="notes-list">{visibleNotes.map((note) => <NoteCard key={note.id || note.title} note={note} list onAccess={onNoteAccess} />)}{visibleNotes.length === 0 && <div className="empty-state">No approved notes match that search yet.</div>}</div></section>
+  const filteredNotes = notes.filter((note) => (subject === 'All notes' || (selectedFolder && (note.folderId ? note.folderId === selectedFolder.id : note.subject === subject))) && `${note.title} ${note.subject}`.toLowerCase().includes(search.toLowerCase()))
+  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 5)
+  return <section className="page-width app-page"><div className="view-heading"><div><span className="eyebrow">The library / 01</span><h1>Find your<br /><i>unfair advantage.</i></h1></div><span className="year-badge">{studentYear || 'All years'} subject room</span></div>{connectionError && <div className="connection-banner" role="alert"><span><strong>Connection interrupted</strong>{connectionError}</span><button className="button button-dark" onClick={onRetry}>Try again</button></div>}<div className="upload-rule"><UploadCloud size={18} /><span>Folders and subjects are organized by your year. Share a note through the public drop at the bottom of this page.</span></div><div className="toolbar"><div className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes, subjects..." /></div><div className="subject-tabs">{availableSubjects.length > 1 ? availableSubjects.map((item) => <button className={subject === item ? 'subject-tab selected' : 'subject-tab'} key={item} onClick={() => setSubject(item)}>{item}</button>) : <span className="panel-caption">No subject folders yet for this year.</span>}</div></div><div className="notes-list">{visibleNotes.map((note) => <NoteCard key={note.id || note.title} note={note} list onAccess={onNoteAccess} />)}{filteredNotes.length === 0 && <div className="empty-state">No approved notes match that search yet.</div>}</div>{filteredNotes.length > 5 && <button className="list-toggle notes-list-toggle" onClick={() => setShowAllNotes((shown) => !shown)}>{showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`} <ChevronDown size={15} className={showAllNotes ? 'list-toggle-open' : ''} /></button>}</section>
 }
 
 function UploadCta() {
@@ -414,10 +410,14 @@ function LegacyAdminView({ users, notes, folders, token, onCreateFolder, onCreat
 
 function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote, onNoteStatus, onBlock, onDelete, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote, onUpdateUser }) {
   const [userFilter, setUserFilter] = useState('')
+  const [queueNoteFilter, setQueueNoteFilter] = useState('')
+  const [showAllQueueNotes, setShowAllQueueNotes] = useState(false)
   const [showAllUsers, setShowAllUsers] = useState(false)
   const [selectedUser, setSelectedUser] = useState(null)
   const filteredUsers = users.filter((user) => userMatchesQuery(user, userFilter))
   const visibleUsers = showAllUsers ? filteredUsers : filteredUsers.slice(0, 5)
+  const filteredQueueNotes = notes.filter((note) => `${note.title} ${note.year} ${note.subject} ${note.author} ${note.status}`.toLowerCase().includes(queueNoteFilter.trim().toLowerCase()))
+  const visibleQueueNotes = showAllQueueNotes ? filteredQueueNotes : filteredQueueNotes.slice(0, 5)
 
   return <section className="page-width app-page">
     <div className="view-heading"><div><span className="eyebrow">Admin only / 03</span><h1>Keep the room<br /><i>in motion.</i></h1></div><a className="button button-dark" href={getExportUrl(token)} target="_blank" rel="noreferrer"><Download size={17} /> Export workbook</a></div>
@@ -433,11 +433,13 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
     <AdminManageContent folders={folders} notes={notes} onEditFolder={onEditFolder} onDeleteFolder={onDeleteFolder} onEditNote={onEditNote} onDeleteNote={onDeleteNote} />
     <div className="admin-table">
       <div className="table-title"><div><span className="eyebrow">Content queue</span><h2>Notes</h2></div><span className="panel-caption">Approve or reject student submissions</span></div>
-      {notes.length === 0 && <div className="empty-state">No notes have been submitted yet.</div>}
-      {notes.map((note) => <div className="table-row" key={note.id}>
+      <div className="search-box queue-note-search"><Search size={17} /><input type="search" value={queueNoteFilter} onChange={(event) => setQueueNoteFilter(event.target.value)} placeholder="Search by title, subject, year, author, or status" /></div>
+      {visibleQueueNotes.map((note) => <div className="table-row" key={note.id}>
         <span className={`file-dot ${note.status === 'approved' ? 'green' : 'yellow'}`}><FileText size={16} /></span><span className="row-name"><b>{note.title}</b><small>{note.year} · {note.subject} · {note.author}</small></span><span className={note.status === 'approved' ? 'review-pill' : 'review-pill pending-pill'}>{note.status}</span>
         {note.status === 'pending' && <><button className="button compact-button" onClick={() => onNoteStatus(note.id, 'approved')}>Approve</button><button className="button compact-button danger-button" onClick={() => onNoteStatus(note.id, 'rejected')}>Reject</button></>}
       </div>)}
+      {filteredQueueNotes.length === 0 && <div className="empty-state">{notes.length ? 'No notes match this search.' : 'No notes have been submitted yet.'}</div>}
+      {filteredQueueNotes.length > 5 && <button className="list-toggle" onClick={() => setShowAllQueueNotes((shown) => !shown)}>{showAllQueueNotes ? 'Show fewer notes' : `Show all ${filteredQueueNotes.length} notes`} <ChevronDown size={15} className={showAllQueueNotes ? 'list-toggle-open' : ''} /></button>}
     </div>
     <div className="admin-table">
       <div className="table-title"><div><span className="eyebrow">Access management</span><h2>Users</h2></div><span className="panel-caption">Only full admins can see this area</span></div>

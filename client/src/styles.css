@@ -76,6 +76,7 @@ footer { display:flex; align-items:center; gap:10px; padding:28px 40px; border-t
 @media (max-width:800px) { .upload-cta { display:block; margin:0 19px; padding:38px 22px 30px; }.upload-cta-copy h2 { font-size:43px; }.upload-cta-button { margin:28px 0 0; }.upload-stamp { right:22px; bottom:18px; } }
 .user-row-actions { display:flex; align-items:center; gap:7px; }
 .management-search { min-height:42px; margin:16px 0 8px; padding:0 11px; border:1px solid var(--line); background:var(--paper); }
+.queue-note-search { max-width:540px; margin:14px 0; padding:0 11px; border:1px solid var(--line); background:var(--paper); }
 .management-search input { min-width:0; }
 .list-toggle { display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:10px; padding:12px 2px 2px; border-top:1px solid var(--line); color:var(--muted); background:none; font-size:11px; text-align:left; }
 .list-toggle:hover { color:var(--ink); }
