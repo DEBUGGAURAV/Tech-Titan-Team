@@ -9,7 +9,7 @@ import { changePassword, createFolder, createNote, deleteAdminUser, deleteFolder
 const years = ['1st year', '2nd year', '3rd year', '4th year']
 const subjects = ['Data Structures', 'Database Systems', 'Operating Systems', 'Web Development']
 const uploadLink = 'https://www.playbook.com/jnpboy/drop'
-const gmailPattern = /^[^\s@]+@gmail\.com$/i
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i
 const notePermissionOptions = [
   { key: 'uploadNotes', label: 'Upload / publish notes' },
   { key: 'editNotes', label: 'Edit notes' },
@@ -39,7 +39,7 @@ function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [subject, setSubject] = useState('All notes')
   const [search, setSearch] = useState('')
-  const [authOpen, setAuthOpen] = useState(false)
+  const [authOpen, setAuthOpen] = useState(() => new URLSearchParams(window.location.search).get('signup') === '1')
   const [adminOpen, setAdminOpen] = useState(false)
   const [session, setSession] = useState(() => JSON.parse(localStorage.getItem('tech-titan-session') || 'null'))
   const [liveNotes, setLiveNotes] = useState([])
@@ -59,7 +59,9 @@ function App() {
     let active = true
     let initialized = false
     let knownNoteIds = new Set()
-    const refreshNotes = () => getNotes(session.token).then((nextNotes) => {
+    const refreshNotes = () => {
+      if (document.visibilityState !== 'visible') return
+      getNotes(session.token).then((nextNotes) => {
       if (!active) return
       const newNotes = nextNotes.filter((note) => !knownNoteIds.has(note.id || note.title))
       if (initialized && newNotes.length) {
@@ -72,13 +74,15 @@ function App() {
       setLiveNotes(nextNotes)
     }).catch((error) => {
       if (active && error.code === 'API_UNREACHABLE') setConnectionError(error.message)
-    })
+      })
+    }
     refreshNotes()
-    const refreshTimer = window.setInterval(refreshNotes, 5000)
+    const refreshTimer = window.setInterval(refreshNotes, 30000)
+    document.addEventListener('visibilitychange', refreshNotes)
     getFolders(session.token).then(setFolders).catch(() => setFolders([]))
     if (isAdmin) getAdminUsers(session.token).then(setAdminUsers).catch(() => setAdminUsers([]))
     if (canManageContent) getAdminNotes(session.token).then(setAdminNotes).catch(() => setAdminNotes([]))
-    return () => { active = false; window.clearInterval(refreshTimer) }
+    return () => { active = false; window.clearInterval(refreshTimer); document.removeEventListener('visibilitychange', refreshNotes) }
   }, [session, isAdmin, canManageContent, connectionAttempt])
 
   const navigate = (nextView) => {
@@ -96,6 +100,9 @@ function App() {
   }
 
   const handleAuthSuccess = (nextSession) => {
+    const location = new URL(window.location.href)
+    location.searchParams.delete('signup')
+    window.history.replaceState({}, '', location)
     localStorage.setItem('tech-titan-session', JSON.stringify(nextSession))
     setSession(nextSession)
     setAuthOpen(false)
@@ -682,7 +689,7 @@ function AdminManageContent({ folders, notes, permissions = {}, onEditFolder, on
 function AuthModal({ onClose, onSuccess }) {
   const [step, setStep] = useState('form')
   const [resetToken] = useState(() => new URLSearchParams(window.location.search).get('reset') || '')
-  const [mode, setMode] = useState(resetToken ? 'reset' : 'signin')
+  const [mode, setMode] = useState(resetToken ? 'reset' : new URLSearchParams(window.location.search).get('signup') === '1' ? 'signup' : 'signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
@@ -695,7 +702,7 @@ function AuthModal({ onClose, onSuccess }) {
   const [message, setMessage] = useState('')
 
   const submitSignIn = async () => {
-    if (!gmailPattern.test(email)) { setError('Use a valid Gmail address ending with @gmail.com.'); return }
+    if (!emailPattern.test(email)) { setError('Enter a valid email address.'); return }
     try { onSuccess(await signIn(email, password)) } catch (requestError) { setError(requestError.message) }
   }
   const validateSignup = () => {
@@ -704,7 +711,7 @@ function AuthModal({ onClose, onSuccess }) {
       return false
     }
     if (!isValidMobile(mobile)) { setError('Enter a valid mobile number with 7 to 15 digits.'); return false }
-    if (!gmailPattern.test(email)) { setError('Use a valid Gmail address ending with @gmail.com.'); return false }
+    if (!emailPattern.test(email)) { setError('Enter a valid email address.'); return false }
     if (password.length < 8) { setError('A password of at least 8 characters is required.'); return false }
     return true
   }

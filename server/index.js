@@ -247,7 +247,18 @@ app.patch('/api/admin/users/:id', authRequired, adminRequired, async (req, res) 
   const userRef = db.collection('users').doc(req.params.id)
   const userSnapshot = await userRef.get()
   if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
-  await userRef.update(profile)
+  const previousUser = userSnapshot.data()
+  const before = Object.fromEntries(Object.keys(profile).map((field) => [field, previousUser[field] || '']))
+  const actionRef = adminActionsCollection().doc()
+  const batch = db.batch()
+  batch.update(userRef, profile)
+  batch.set(actionRef, {
+    ...createAdminAction(req, { id: userSnapshot.id, ...previousUser }, 'user_profile_updated'),
+    previousProfile: before,
+    updatedProfile: profile,
+    status: 'completed',
+  })
+  await batch.commit()
   res.json({ ...serializeUser(userSnapshot), ...profile })
 })
 app.patch('/api/admin/users/:id/block', authRequired, adminRequired, async (req, res) => {
@@ -292,13 +303,28 @@ app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res)
   const userSnapshot = await userRef.get()
   if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
   const actionRef = adminActionsCollection().doc()
-  await actionRef.set(createAdminAction(req, { id: userSnapshot.id, ...userSnapshot.data() }, 'user_deleted', 'pending'))
-  await deletedAccountsCollection().doc(userSnapshot.id).set({ email: userSnapshot.data().email || '', deletedAt: FieldValue.serverTimestamp() })
+  const userData = userSnapshot.data()
+  const { passwordHash, createdAt, ...safeUserData } = userData
+  const activitySnapshot = await userActivityCollection(userSnapshot.id).get()
+  const archivedActivity = activitySnapshot.docs.map((activitySnapshot) => {
+    const activity = activitySnapshot.data()
+    return { event: activity.event || '', ipAddress: activity.ipAddress || '', eventAt: activity.eventAt || FieldValue.serverTimestamp(), noteId: activity.noteId || '', noteTitle: activity.noteTitle || '', subject: activity.subject || '' }
+  })
+  const deletedAccountRef = deletedAccountsCollection().doc()
+  await actionRef.set(createAdminAction(req, { id: userSnapshot.id, ...userData }, 'user_deleted', 'pending'))
+  await deletedAccountRef.set({ ...safeUserData, originalUserId: userSnapshot.id, registeredAt: toIso(createdAt), deletedBy: req.user.id, deletedByName: req.user.name || '', deletedByEmail: req.user.email || '', deletedByIp: req.ip || '', deletionStatus: 'pending', deletedAt: FieldValue.serverTimestamp() })
+  for (let index = 0; index < archivedActivity.length; index += 450) {
+    const batch = db.batch()
+    archivedActivity.slice(index, index + 450).forEach((activity) => batch.set(deletedAccountRef.collection('activity').doc(), activity))
+    await batch.commit()
+  }
   try {
     await db.recursiveDelete(userRef)
     await actionRef.update({ status: 'completed', completedAt: FieldValue.serverTimestamp() })
+    await deletedAccountRef.update({ deletionStatus: 'completed' })
   } catch {
     await actionRef.update({ status: 'failed', completedAt: FieldValue.serverTimestamp() })
+    await deletedAccountRef.update({ deletionStatus: 'failed' })
     return res.status(500).json({ message: 'User deletion failed; the admin action was recorded.' })
   }
   res.json({ id: req.params.id, deleted: true })
@@ -306,19 +332,22 @@ app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res)
 app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res) => {
   const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
   const users = snapshot.docs.map(serialize)
-  const rows = users.map((user) => ({ Name: user.name || '', Email: user.email || '', 'Mobile Number': user.mobile || '', College: user.college || '', Year: user.year || '', Branch: user.branch || '', Role: user.role || 'student', 'Note Permissions': describeNotePermissions(user), Blocked: user.blocked ? 'Yes' : 'No' }))
+  const deletedSnapshot = await deletedAccountsCollection().orderBy('deletedAt', 'desc').get()
+  const deletedUsers = deletedSnapshot.docs.map((deletedDoc) => ({ id: deletedDoc.id, ...deletedDoc.data() }))
+  const exportUserRow = (user, accountStatus, deletedAt = '') => ({ Name: user.name || '', Email: user.email || '', 'Mobile Number': user.mobile || '', College: user.college || '', Year: user.year || '', Branch: user.branch || '', Role: user.role || 'student', 'Note Permissions': describeNotePermissions(user), 'Account Status': accountStatus, 'Registered At': user.registeredAt || toIso(user.createdAt), 'Deleted At': deletedAt })
+  const rows = [...users.map((user) => exportUserRow(user, 'Active')), ...deletedUsers.map((user) => exportUserRow(user, user.deletionStatus === 'completed' ? 'Deleted' : `Deletion ${user.deletionStatus || 'pending'}`, toIso(user.deletedAt)))]
+  const deletedUserRows = deletedUsers.map((user) => ({ ...exportUserRow(user, user.deletionStatus === 'completed' ? 'Deleted' : `Deletion ${user.deletionStatus || 'pending'}`, toIso(user.deletedAt)), 'Original User ID': user.originalUserId || '', 'Deleted By': user.deletedByName || '', 'Deleted By Email': user.deletedByEmail || '', 'Deleted By IP': user.deletedByIp || '' }))
   const notesSnapshot = await db.collection('notes').orderBy('createdAt', 'desc').get()
   const noteRows = notesSnapshot.docs.map((noteSnapshot) => {
     const note = noteSnapshot.data()
     return { Title: note.title || '', Subject: note.subject || '', Year: note.year || '', FolderId: note.folderId || '', DriveLink: note.driveLink || '', Author: note.author || '', Status: note.status || '', UploadedAt: note.createdAt?.toDate?.().toISOString() || '' }
   })
-  const activityRows = []
-  for (const userSnapshot of snapshot.docs) {
+  const activityGroups = await Promise.all(snapshot.docs.map(async (userSnapshot) => {
     const user = userSnapshot.data()
     const activitySnapshot = await userActivityCollection(userSnapshot.id).orderBy('eventAt', 'asc').get()
-    activitySnapshot.docs.forEach((activitySnapshot) => {
+    return activitySnapshot.docs.map((activitySnapshot) => {
       const activity = activitySnapshot.data()
-      activityRows.push({
+      return {
         Name: user.name || '',
         Email: user.email || '',
         Event: activity.event || '',
@@ -328,9 +357,29 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
         'Note Title': activity.noteTitle || '',
         Subject: activity.subject || '',
         'Note ID': activity.noteId || '',
-      })
+      }
     })
-  }
+  }))
+  const archivedActivityGroups = await Promise.all(deletedSnapshot.docs.map(async (deletedUserSnapshot) => {
+    const user = deletedUserSnapshot.data()
+    const activitySnapshot = await deletedUserSnapshot.ref.collection('activity').orderBy('eventAt', 'asc').get()
+    return activitySnapshot.docs.map((activitySnapshot) => {
+      const activity = activitySnapshot.data()
+      return {
+        Name: user.name || '',
+        Email: user.email || '',
+        Event: activity.event || '',
+        'IP Address': activity.ipAddress || '',
+        'Registered At': user.registeredAt || '',
+        'Event Time': toIso(activity.eventAt),
+        'Note Title': activity.noteTitle || '',
+        Subject: activity.subject || '',
+        'Note ID': activity.noteId || '',
+      }
+    })
+  }))
+  const archivedActivityRows = archivedActivityGroups.flat()
+  const activityRows = [...activityGroups.flat(), ...archivedActivityRows]
   const adminActionSnapshot = await adminActionsCollection().orderBy('occurredAt', 'asc').get()
   const adminActionRows = adminActionSnapshot.docs.map((actionSnapshot) => {
     const action = actionSnapshot.data()
@@ -348,6 +397,8 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
       'IP Address': action.ipAddress || '',
       'Note Permissions': action.permissions ? describeNotePermissions({ role: action.fullAdmin ? 'admin' : 'note_manager', permissions: action.permissions }) : '',
       'Full Admin Access': action.fullAdmin ? 'Yes' : 'No',
+      'Previous Profile': action.previousProfile ? JSON.stringify(action.previousProfile) : '',
+      'Updated Profile': action.updatedProfile ? JSON.stringify(action.updatedProfile) : '',
       'Action Time': toIso(action.occurredAt),
       'Completed Time': toIso(action.completedAt),
     }
@@ -357,6 +408,7 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(noteRows), 'Uploaded Notes')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(activityRows), 'User Activity')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(adminActionRows), 'Admin Actions')
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(deletedUserRows), 'Deleted Users')
   const output = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
   res.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').attachment('tech-titan-team-students.xlsx').send(output)
 })
@@ -366,7 +418,7 @@ app.post('/api/auth/request-otp', async (req, res) => {
   const normalizedEmail = email?.trim().toLowerCase()
   if (purpose !== 'signup') return res.status(400).json({ message: 'Email codes are only available for signup.' })
   if (!normalizedEmail) return res.status(400).json({ message: 'Email is required' })
-  if (!/^[^\s@]+@gmail\.com$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Only valid @gmail.com addresses can receive a signup code.' })
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Enter a valid email address.' })
   const code = String(crypto.randomInt(100000, 1000000))
   otpStore.set(normalizedEmail, { code, purpose, expires: Date.now() + 10 * 60 * 1000 })
   if (mailjet && process.env.MAILJET_SENDER_EMAIL) {
@@ -391,8 +443,8 @@ app.post('/api/auth/signin', async (req, res) => {
   const userRef = db.collection('users').doc(Buffer.from(normalizedEmail || '').toString('base64url'))
   const snapshot = await userRef.get()
   if (!snapshot.exists) {
-    const deletedAccount = await deletedAccountsCollection().doc(userRef.id).get()
-    if (deletedAccount.exists) return res.status(410).json({ message: 'This account was removed by an administrator. Please register again with the same email address.' })
+    const deletedAccounts = await deletedAccountsCollection().where('email', '==', normalizedEmail || '').limit(1).get()
+    if (!deletedAccounts.empty) return res.status(410).json({ message: 'This account was removed by an administrator. Please register again with the same email address.' })
     return res.status(401).json({ message: 'Email or password is incorrect.' })
   }
   if (!(await bcrypt.compare(password || '', snapshot.data().passwordHash || ''))) return res.status(401).json({ message: 'Email or password is incorrect.' })
@@ -459,7 +511,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 app.post('/api/auth/verify-otp', async (req, res) => {
   const { email, code, password, name, mobile, college, year, branch } = req.body
   const normalizedEmail = email?.trim().toLowerCase()
-  if (!normalizedEmail || !/^[^\s@]+@gmail\.com$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Use a valid Gmail address.' })
+  if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Enter a valid email address.' })
   if (![name, mobile, college, year, branch].every((value) => typeof value === 'string' && value.trim())) return res.status(400).json({ message: 'Name, mobile number, college, year, and branch are required.' })
   if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
   if (!password || password.length < 8) return res.status(400).json({ message: 'A password of at least 8 characters is required.' })
@@ -473,7 +525,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   const registrationBatch = db.batch()
   registrationBatch.set(userRef, user)
   registrationBatch.set(userActivityCollection(userRef.id).doc(), createActivityRecord('registered', req))
-  registrationBatch.delete(deletedAccountsCollection().doc(userRef.id))
   await registrationBatch.commit()
   const responseUser = { id: userRef.id, ...user, createdAt: undefined }
   const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, process.env.JWT_SECRET || 'development-secret')
