@@ -19,7 +19,7 @@ async function request(path, options = {}, token) {
 
 export const requestSignupCode = (email) => request('/auth/request-otp', { method: 'POST', body: JSON.stringify({ email, purpose: 'signup' }) })
 export const signUp = (email, password, name, college, year, branch) => request('/auth/signup', { method: 'POST', body: JSON.stringify({ email, password, name, college, year, branch }) })
-export const verifySignupCode = (email, code, password, name, college, year, branch, mobile) => request('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email, code, password, name, college, year, branch, mobile }) })
+export const verifySignupCode = (email, code, password, name, college, year, branch, course, mobile) => request('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email, code, password, name, college, year, branch, course, mobile }) })
 export const updateProfile = (profile, token) => request('/me', { method: 'PATCH', body: JSON.stringify(profile) }, token)
 export const signIn = (email, password) => request('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password }) })
 export const changePassword = (currentPassword, newPassword, token) => request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }, token)
@@ -40,6 +40,7 @@ export const updateAdminUser = (id, profile, token) => request(`/admin/users/${i
 export const setUserBlocked = (id, blocked, token) => request(`/admin/users/${id}/block`, { method: 'PATCH', body: JSON.stringify({ blocked }) }, token)
 export const setUserPermissions = (id, permissions, fullAdmin, token) => request(`/admin/users/${id}/permissions`, { method: 'PATCH', body: JSON.stringify({ permissions, fullAdmin }) }, token)
 export const deleteAdminUser = (id, token) => request(`/admin/users/${id}`, { method: 'DELETE' }, token)
+export const deleteAllAdminUsers = (token) => request('/admin/users', { method: 'DELETE' }, token)
 export const recordNoteAccess = (id, token) => request(`/notes/${id}/access`, { method: 'POST' }, token)
 export const recordLogout = (token) => request('/auth/logout', { method: 'POST' }, token)
 export const getExportUrl = (token) => `${API_URL}/admin/users/export?token=${encodeURIComponent(token)}`

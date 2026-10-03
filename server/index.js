@@ -26,6 +26,7 @@ const firebaseApp = getApps().length ? getApps()[0] : initializeApp({
 })
 const db = getFirestore(firebaseApp)
 const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean))
+const studentYears = ['1st year', '2nd year', '3rd year', '4th year']
 const normalizeMobile = (value) => typeof value === 'string' ? value.trim() : ''
 const isValidMobile = (value) => {
   const mobile = normalizeMobile(value)
@@ -230,18 +231,18 @@ app.get('/api/admin/users/:id', authRequired, adminRequired, async (req, res, ne
   const activitySnapshot = await userActivityCollection(req.params.id).orderBy('eventAt', 'desc').limit(100).get()
   const activity = activitySnapshot.docs.map((snapshot) => {
     const event = snapshot.data()
-    return { id: snapshot.id, event: event.event || '', ipAddress: event.ipAddress || '', occurredAt: toIso(event.eventAt), noteId: event.noteId || '', noteTitle: event.noteTitle || '', subject: event.subject || '' }
+    return { id: snapshot.id, event: event.event || '', ipAddress: event.ipAddress || '', occurredAt: toIso(event.eventAt), noteId: event.noteId || '', noteTitle: event.noteTitle || '', subject: event.subject || '', year: event.year || '', course: event.course || '' }
   })
   res.json({ user: serializeUser(userSnapshot), activity })
 })
 app.patch('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
-  const { name, mobile, college, year, branch } = req.body || {}
-  if (![name, mobile, college, year, branch].every((value) => typeof value === 'string' && value.trim())) {
-    return res.status(400).json({ message: 'Name, mobile number, college, year, and branch are required.' })
+  const { name, mobile, college, year, branch, course } = req.body || {}
+  if (![name, mobile, college, year, branch, course].every((value) => typeof value === 'string' && value.trim())) {
+    return res.status(400).json({ message: 'Name, mobile number, college, year, branch, and course are required.' })
   }
-  const profile = { name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: year.trim(), branch: branch.trim() }
+  const profile = { name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: year.trim(), branch: branch.trim(), course: course.trim() }
   if (!isValidMobile(profile.mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
-  if (profile.name.length > 120 || profile.mobile.length > 20 || profile.college.length > 200 || profile.year.length > 80 || profile.branch.length > 120) {
+  if (profile.name.length > 120 || profile.mobile.length > 20 || profile.college.length > 200 || profile.year.length > 80 || profile.branch.length > 120 || profile.course.length > 120) {
     return res.status(400).json({ message: 'One or more profile fields are too long.' })
   }
   const userRef = db.collection('users').doc(req.params.id)
@@ -297,18 +298,15 @@ app.patch('/api/admin/users/:id/permissions', authRequired, adminRequired, async
   await batch.commit()
   res.json({ id: snapshot.id, role, permissions })
 })
-app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
-  if (req.params.id === req.user.id) return res.status(400).json({ message: 'You cannot delete your own admin account.' })
-  const userRef = db.collection('users').doc(req.params.id)
-  const userSnapshot = await userRef.get()
-  if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
+const archiveAndDeleteUser = async (req, userSnapshot) => {
+  const userRef = userSnapshot.ref
   const actionRef = adminActionsCollection().doc()
   const userData = userSnapshot.data()
   const { passwordHash, createdAt, ...safeUserData } = userData
   const activitySnapshot = await userActivityCollection(userSnapshot.id).get()
   const archivedActivity = activitySnapshot.docs.map((activitySnapshot) => {
     const activity = activitySnapshot.data()
-    return { event: activity.event || '', ipAddress: activity.ipAddress || '', eventAt: activity.eventAt || FieldValue.serverTimestamp(), noteId: activity.noteId || '', noteTitle: activity.noteTitle || '', subject: activity.subject || '' }
+    return { event: activity.event || '', ipAddress: activity.ipAddress || '', eventAt: activity.eventAt || FieldValue.serverTimestamp(), noteId: activity.noteId || '', noteTitle: activity.noteTitle || '', subject: activity.subject || '', year: activity.year || '', course: activity.course || '' }
   })
   const deletedAccountRef = deletedAccountsCollection().doc()
   await actionRef.set(createAdminAction(req, { id: userSnapshot.id, ...userData }, 'user_deleted', 'pending'))
@@ -325,16 +323,41 @@ app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res)
   } catch {
     await actionRef.update({ status: 'failed', completedAt: FieldValue.serverTimestamp() })
     await deletedAccountRef.update({ deletionStatus: 'failed' })
-    return res.status(500).json({ message: 'User deletion failed; the admin action was recorded.' })
+    throw new Error('User deletion failed; the admin action was recorded.')
   }
-  res.json({ id: req.params.id, deleted: true })
+  return userSnapshot.id
+}
+
+app.delete('/api/admin/users', authRequired, adminRequired, async (req, res) => {
+  const snapshot = await db.collection('users').get()
+  const targets = snapshot.docs.filter((userSnapshot) => userSnapshot.data().role !== 'admin')
+  let deletedCount = 0
+  for (let index = 0; index < targets.length; index += 10) {
+    const results = await Promise.allSettled(targets.slice(index, index + 10).map((userSnapshot) => archiveAndDeleteUser(req, userSnapshot)))
+    deletedCount += results.filter((result) => result.status === 'fulfilled').length
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed) return res.status(500).json({ message: `${failed.reason.message} ${deletedCount} of ${targets.length} non-admin user(s) were deleted.` })
+  }
+  res.json({ deletedCount })
+})
+
+app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
+  if (req.params.id === req.user.id) return res.status(400).json({ message: 'You cannot delete your own admin account.' })
+  const userSnapshot = await db.collection('users').doc(req.params.id).get()
+  if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
+  try {
+    await archiveAndDeleteUser(req, userSnapshot)
+    res.json({ id: req.params.id, deleted: true })
+  } catch (error) {
+    res.status(500).json({ message: error.message })
+  }
 })
 app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res) => {
   const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
   const users = snapshot.docs.map(serialize)
   const deletedSnapshot = await deletedAccountsCollection().orderBy('deletedAt', 'desc').get()
   const deletedUsers = deletedSnapshot.docs.map((deletedDoc) => ({ id: deletedDoc.id, ...deletedDoc.data() }))
-  const exportUserRow = (user, accountStatus, deletedAt = '') => ({ Name: user.name || '', Email: user.email || '', 'Mobile Number': user.mobile || '', College: user.college || '', Year: user.year || '', Branch: user.branch || '', Role: user.role || 'student', 'Note Permissions': describeNotePermissions(user), 'Account Status': accountStatus, 'Registered At': user.registeredAt || toIso(user.createdAt), 'Deleted At': deletedAt })
+  const exportUserRow = (user, accountStatus, deletedAt = '') => ({ Name: user.name || '', Email: user.email || '', 'Mobile Number': user.mobile || '', College: user.college || '', Year: user.year || '', Branch: user.branch || '', Course: user.course || '', Role: user.role || 'student', 'Note Permissions': describeNotePermissions(user), 'Account Status': accountStatus, 'Registered At': user.registeredAt || toIso(user.createdAt), 'Deleted At': deletedAt })
   const rows = [...users.map((user) => exportUserRow(user, 'Active')), ...deletedUsers.map((user) => exportUserRow(user, user.deletionStatus === 'completed' ? 'Deleted' : `Deletion ${user.deletionStatus || 'pending'}`, toIso(user.deletedAt)))]
   const deletedUserRows = deletedUsers.map((user) => ({ ...exportUserRow(user, user.deletionStatus === 'completed' ? 'Deleted' : `Deletion ${user.deletionStatus || 'pending'}`, toIso(user.deletedAt)), 'Original User ID': user.originalUserId || '', 'Deleted By': user.deletedByName || '', 'Deleted By Email': user.deletedByEmail || '', 'Deleted By IP': user.deletedByIp || '' }))
   const notesSnapshot = await db.collection('notes').orderBy('createdAt', 'desc').get()
@@ -350,6 +373,8 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
       return {
         Name: user.name || '',
         Email: user.email || '',
+        Course: user.course || '',
+        Year: user.year || '',
         Event: activity.event || '',
         'IP Address': activity.ipAddress || '',
         'Registered At': toIso(user.createdAt),
@@ -368,6 +393,8 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
       return {
         Name: user.name || '',
         Email: user.email || '',
+        Course: user.course || '',
+        Year: user.year || '',
         Event: activity.event || '',
         'IP Address': activity.ipAddress || '',
         'Registered At': user.registeredAt || '',
@@ -452,7 +479,7 @@ app.post('/api/auth/signin', async (req, res) => {
   if (user.blocked) return res.status(403).json({ message: 'This account is blocked.' })
   await recordUserActivity(userRef.id, req, 'login')
   const token = jwt.sign({ userId: userRef.id, email: user.email }, process.env.JWT_SECRET || 'development-secret')
-  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile || '', college: user.college || '', year: user.year || '', branch: user.branch || '', role: user.role, permissions: user.permissions || {}, blocked: false } })
+  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile || '', college: user.college || '', year: user.year || '', branch: user.branch || '', course: user.course || user.branch || '', role: user.role, permissions: user.permissions || {}, blocked: false } })
 })
 
 app.post('/api/auth/logout', authRequired, async (req, res) => {
@@ -509,11 +536,13 @@ app.post('/api/auth/reset-password', async (req, res) => {
 })
 
 app.post('/api/auth/verify-otp', async (req, res) => {
-  const { email, code, password, name, mobile, college, year, branch } = req.body
+  const { email, code, password, name, mobile, college, year, branch, course } = req.body
   const normalizedEmail = email?.trim().toLowerCase()
   if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Enter a valid email address.' })
-  if (![name, mobile, college, year, branch].every((value) => typeof value === 'string' && value.trim())) return res.status(400).json({ message: 'Name, mobile number, college, year, and branch are required.' })
+  if (![name, mobile, college, year, branch, course].every((value) => typeof value === 'string' && value.trim())) return res.status(400).json({ message: 'Name, mobile number, college, year, branch, and course are required.' })
+  if (!studentYears.includes(year.trim())) return res.status(400).json({ message: 'Choose a year from 1st year to 4th year.' })
   if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
+  if (course.trim().length > 120) return res.status(400).json({ message: 'Course must be 120 characters or fewer.' })
   if (!password || password.length < 8) return res.status(400).json({ message: 'A password of at least 8 characters is required.' })
   const record = otpStore.get(normalizedEmail)
   if (!record || record.purpose !== 'signup' || record.expires < Date.now() || record.code !== code) return res.status(401).json({ message: 'Invalid or expired code' })
@@ -521,23 +550,24 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   const userRef = db.collection('users').doc(Buffer.from(normalizedEmail).toString('base64url'))
   const existing = await userRef.get()
   if (existing.exists) return res.status(409).json({ message: 'An account already exists for this email. Sign in instead.' })
-  const user = { email: normalizedEmail, name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: typeof year === 'string' ? year.trim() : '', branch: branch.trim(), passwordHash: await bcrypt.hash(password, 12), role: adminEmails.has(normalizedEmail) ? 'admin' : 'student', blocked: false, createdAt: FieldValue.serverTimestamp() }
+  const user = { email: normalizedEmail, name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: year.trim(), branch: branch.trim(), course: course.trim(), passwordHash: await bcrypt.hash(password, 12), role: adminEmails.has(normalizedEmail) ? 'admin' : 'student', blocked: false, createdAt: FieldValue.serverTimestamp() }
   const registrationBatch = db.batch()
   registrationBatch.set(userRef, user)
-  registrationBatch.set(userActivityCollection(userRef.id).doc(), createActivityRecord('registered', req))
+  registrationBatch.set(userActivityCollection(userRef.id).doc(), createActivityRecord('registered', req, { year: user.year, course: user.course }))
   await registrationBatch.commit()
   const responseUser = { id: userRef.id, ...user, createdAt: undefined }
   const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, process.env.JWT_SECRET || 'development-secret')
-  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile, college: user.college, year: user.year, branch: user.branch, role: user.role, permissions: user.permissions || {}, blocked: false } })
+  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile, college: user.college, year: user.year, branch: user.branch, course: user.course, role: user.role, permissions: user.permissions || {}, blocked: false } })
 })
 
 app.patch('/api/me', authRequired, async (req, res) => {
-  const { name, mobile, college, year, branch } = req.body
-  if (![name, mobile, college, year, branch].every((value) => typeof value === 'string' && value.trim())) {
-    return res.status(400).json({ message: 'Name, mobile number, college, year, and branch are required.' })
+  const { name, mobile, college, year, branch, course } = req.body
+  if (![name, mobile, college, year, branch, course].every((value) => typeof value === 'string' && value.trim())) {
+    return res.status(400).json({ message: 'Name, mobile number, college, year, branch, and course are required.' })
   }
-  const profile = { name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: typeof year === 'string' ? year.trim() : '', branch: branch.trim() }
+  const profile = { name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: typeof year === 'string' ? year.trim() : '', branch: branch.trim(), course: course.trim() }
   if (!isValidMobile(profile.mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
+  if (profile.course.length > 120) return res.status(400).json({ message: 'Course must be 120 characters or fewer.' })
   await db.collection('users').doc(req.user.id).update(profile)
   res.json({ id: req.user.id, email: req.user.email, ...profile, role: req.user.role })
 })

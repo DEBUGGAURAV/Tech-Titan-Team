@@ -113,6 +113,7 @@ footer { display:flex; align-items:center; gap:10px; padding:28px 40px; border-t
 .permission-save { white-space:nowrap; }
 .user-details-modal { width:min(760px,100%); }
 .user-details-modal h2 { font-size:36px; margin:14px 0; }
+.user-management-actions { display:flex; align-items:center; gap:12px; }
 .user-detail-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:14px; }
 .user-detail-form .modal-label { min-width:0; }
 .user-detail-form .button { justify-self:start; }
@@ -129,6 +130,7 @@ footer { display:flex; align-items:center; gap:10px; padding:28px 40px; border-t
 .activity-ip { overflow-wrap:anywhere; text-align:right; }
 .activity-note { grid-column:1/-1; }
 @media (max-width:800px) {
+	.user-management-actions { align-items:flex-start; flex-direction:column; gap:9px; }
 	.user-access-row { display:grid; grid-template-columns:36px minmax(0,1fr); align-items:center; gap:10px; }
 	.user-access-row .review-pill { grid-column:2; justify-self:start; }
 	.user-row-actions { grid-column:1/-1; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); width:100%; }

@@ -4,7 +4,7 @@ import {
   GraduationCap, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Pencil, Plus,
   Search, Settings2, ShieldCheck, Sparkles, UploadCloud, Users, X, Zap,
 } from 'lucide-react'
-import { changePassword, createFolder, createNote, deleteAdminUser, deleteFolder, deleteNote, forgotPassword, getAdminNotes, getAdminUserDetails, getAdminUsers, getExportUrl, getFolders, getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword, setUserBlocked, setUserPermissions, signIn, signUp, updateAdminUser, updateFolder, updateNote, updateProfile, verifySignupCode } from './api'
+import { changePassword, createFolder, createNote, deleteAdminUser, deleteAllAdminUsers, deleteFolder, deleteNote, forgotPassword, getAdminNotes, getAdminUserDetails, getAdminUsers, getExportUrl, getFolders, getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword, setUserBlocked, setUserPermissions, signIn, signUp, updateAdminUser, updateFolder, updateNote, updateProfile, verifySignupCode } from './api'
 
 const years = ['1st year', '2nd year', '3rd year', '4th year']
 const subjects = ['Data Structures', 'Database Systems', 'Operating Systems', 'Web Development']
@@ -25,7 +25,7 @@ const isValidMobile = (value) => {
 }
 const userMatchesQuery = (user, query) => {
   const normalizedQuery = query.trim().toLowerCase()
-  return !normalizedQuery || [user.name, user.email, user.mobile, user.college, user.year, user.branch, user.role]
+  return !normalizedQuery || [user.name, user.email, user.mobile, user.college, user.year, user.branch, user.course, user.role]
     .some((value) => String(value || '').toLowerCase().includes(normalizedQuery))
 }
 const students = [
@@ -235,6 +235,16 @@ function App() {
     } catch (error) { setNotice(error.message) }
   }
 
+  const handleDeleteAllUsers = async () => {
+    const count = adminUsers.filter((user) => user.role !== 'admin').length
+    if (!count || !window.confirm(`Permanently delete all ${count} non-admin users? Their activity will be archived in the export.`)) return
+    try {
+      const result = await deleteAllAdminUsers(session.token)
+      setAdminUsers((users) => users.filter((user) => user.role === 'admin'))
+      setNotice(`${result.deletedCount} non-admin user(s) deleted.`)
+    } catch (error) { setNotice(error.message) }
+  }
+
   const scrollTo = (id) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
 
   return (
@@ -261,7 +271,7 @@ function App() {
         <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
         <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 8)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
         <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
-        {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
+        {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onDeleteAll={handleDeleteAllUsers} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
         {isAdmin && <ContentAdminManager users={adminUsers} onSavePermissions={handleSetContentPermissions} />}
         {canManageContent && !isAdmin && <div id="admin"><ContentAdminView folders={folders} notes={adminNotes} permissions={session.user.permissions || {}} onCreateNote={handleAdminNote} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onNoteStatus={handleNoteStatus} /></div>}
         </>}
@@ -349,6 +359,7 @@ function ProfileView({ user, onSave, onBack }) {
     college: user?.college || '',
     year: user?.year || '',
     branch: user?.branch || '',
+    course: user?.course || user?.branch || '',
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -362,7 +373,7 @@ function ProfileView({ user, onSave, onBack }) {
   const updateField = (field) => (event) => setProfile((current) => ({ ...current, [field]: event.target.value }))
   const submit = async (event) => {
     event.preventDefault()
-    if ([profile.name, profile.mobile, profile.college, profile.year, profile.branch].some((value) => !value.trim())) {
+    if ([profile.name, profile.mobile, profile.college, profile.year, profile.branch, profile.course].some((value) => !value.trim())) {
       setError('Complete every profile field before saving.')
       return
     }
@@ -404,9 +415,10 @@ function ProfileView({ user, onSave, onBack }) {
         <label>Mobile number<input type="tel" inputMode="tel" autoComplete="tel" maxLength={20} value={profile.mobile} onChange={updateField('mobile')} required /></label>
         <label>College<input value={profile.college} onChange={updateField('college')} required /></label>
         <div className="two-fields">
-          <label>Year<input value={profile.year} onChange={updateField('year')} required /></label>
+          <label>Year<select value={profile.year} onChange={updateField('year')} required><option value="">Choose year</option>{years.map((year) => <option key={year}>{year}</option>)}</select></label>
           <label>Branch<input value={profile.branch} onChange={updateField('branch')} required /></label>
         </div>
+        <label>Course<input value={profile.course} onChange={updateField('course')} required /></label>
         {error && <p className="form-error">{error}</p>}
         <button className="button button-dark" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save changes'} <Check size={16} /></button>
       </form>
@@ -463,7 +475,7 @@ function LegacyAdminView({ users, notes, folders, token, onCreateFolder, onCreat
   </section>
 }
 
-function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote, onNoteStatus, onBlock, onDelete, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote, onUpdateUser }) {
+function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote, onNoteStatus, onBlock, onDelete, onDeleteAll, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote, onUpdateUser }) {
   const [userFilter, setUserFilter] = useState('')
   const [queueNoteFilter, setQueueNoteFilter] = useState('')
   const [showAllQueueNotes, setShowAllQueueNotes] = useState(false)
@@ -497,8 +509,8 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
       {filteredQueueNotes.length > 7 && <button className="list-toggle" onClick={() => setShowAllQueueNotes((shown) => !shown)}>{showAllQueueNotes ? 'Show fewer notes' : `Show all ${filteredQueueNotes.length} notes`} <ChevronDown size={15} className={showAllQueueNotes ? 'list-toggle-open' : ''} /></button>}
     </div>
     <div className="admin-table">
-      <div className="table-title"><div><span className="eyebrow">Access management</span><h2>Users</h2></div><span className="panel-caption">Only full admins can see this area</span></div>
-      <div className="search-box"><Search size={17} /><input type="search" value={userFilter} onChange={(event) => setUserFilter(event.target.value)} placeholder="Find by name, email, college, year, branch, or role" /></div>
+      <div className="table-title"><div><span className="eyebrow">Access management</span><h2>Users</h2></div><div className="user-management-actions"><span className="panel-caption">Only full admins can see this area</span><button className="button compact-button danger-button" onClick={onDeleteAll} disabled={!users.some((user) => user.role !== 'admin')}>Delete all non-admin users</button></div></div>
+      <div className="search-box"><Search size={17} /><input type="search" value={userFilter} onChange={(event) => setUserFilter(event.target.value)} placeholder="Find by name, email, college, year, branch, course, or role" /></div>
       {visibleUsers.map((user) => <div className="table-row user-access-row" key={user.id}>
         <span className="file-dot blue"><Users size={16} /></span><span className="row-name"><b>{user.name || 'Unnamed student'}</b><small>{user.email} · {user.role}</small></span><span className={user.blocked ? 'review-pill blocked-pill' : 'review-pill'}>{user.blocked ? 'Blocked' : 'Active'}</span>
         <div className="user-row-actions"><button className="button compact-button" onClick={() => setSelectedUser(user)}>Details / edit</button><button className="button compact-button" onClick={() => onBlock(user.id, !user.blocked)}>{user.blocked ? 'Unblock' : 'Block'}</button><button className="button compact-button danger-button" onClick={() => { if (window.confirm(`Delete ${user.name || user.email}?`)) onDelete(user.id) }}>Delete</button></div>
@@ -511,7 +523,7 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
 }
 
 function AdminUserDetailsModal({ user, token, onClose, onSave }) {
-  const [profile, setProfile] = useState({ name: user.name || '', mobile: user.mobile || '', college: user.college || '', year: user.year || '', branch: user.branch || '' })
+  const [profile, setProfile] = useState({ name: user.name || '', mobile: user.mobile || '', college: user.college || '', year: user.year || '', branch: user.branch || '', course: user.course || user.branch || '' })
   const [registeredAt, setRegisteredAt] = useState(user.registeredAt || '')
   const [activity, setActivity] = useState([])
   const [loading, setLoading] = useState(true)
@@ -522,7 +534,7 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
     let active = true
     getAdminUserDetails(user.id, token).then((details) => {
       if (!active) return
-      setProfile({ name: details.user.name || '', mobile: details.user.mobile || '', college: details.user.college || '', year: details.user.year || '', branch: details.user.branch || '' })
+      setProfile({ name: details.user.name || '', mobile: details.user.mobile || '', college: details.user.college || '', year: details.user.year || '', branch: details.user.branch || '', course: details.user.course || details.user.branch || '' })
       setRegisteredAt(details.user.registeredAt || '')
       setActivity(details.activity)
     }).catch((requestError) => { if (active) setError(requestError.message) }).finally(() => { if (active) setLoading(false) })
@@ -539,7 +551,7 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
     setError('')
     try {
       const updated = await onSave(user.id, profile)
-      setProfile({ name: updated.name, mobile: updated.mobile, college: updated.college, year: updated.year, branch: updated.branch })
+      setProfile({ name: updated.name, mobile: updated.mobile, college: updated.college, year: updated.year, branch: updated.branch, course: updated.course })
     } catch (saveError) { setError(saveError.message) } finally { setSaving(false) }
   }
 
@@ -553,8 +565,9 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
         <label className="modal-label">Full name<input required maxLength={120} value={profile.name} onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></label>
         <label className="modal-label">Mobile number<input type="tel" inputMode="tel" autoComplete="tel" maxLength={20} required value={profile.mobile} onChange={(event) => setProfile({ ...profile, mobile: event.target.value })} /></label>
         <label className="modal-label">College<input required maxLength={200} value={profile.college} onChange={(event) => setProfile({ ...profile, college: event.target.value })} /></label>
-        <label className="modal-label">Year<input required maxLength={80} value={profile.year} onChange={(event) => setProfile({ ...profile, year: event.target.value })} /></label>
+        <label className="modal-label">Year<select required value={profile.year} onChange={(event) => setProfile({ ...profile, year: event.target.value })}><option value="">Choose year</option>{years.map((year) => <option key={year}>{year}</option>)}</select></label>
         <label className="modal-label">Branch<input required maxLength={120} value={profile.branch} onChange={(event) => setProfile({ ...profile, branch: event.target.value })} /></label>
+        <label className="modal-label">Course<input required maxLength={120} value={profile.course} onChange={(event) => setProfile({ ...profile, course: event.target.value })} /></label>
         {error && <p className="form-error user-detail-error">{error}</p>}
         <button className="button button-dark" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save profile'} <Check size={16} /></button>
       </form>
@@ -562,7 +575,7 @@ function AdminUserDetailsModal({ user, token, onClose, onSave }) {
         <div className="panel-title"><span>Account activity</span><Clock3 size={17} /></div>
         <p className="panel-help">Registration, sign-in, sign-out, and opened notes. IP addresses are visible only to admins.</p>
         {loading ? <div className="empty-state">Loading activity…</div> : activity.length ? <div className="user-activity-list">{activity.map((item) => <article className="user-activity-row" key={item.id}>
-          <div><b>{item.event === 'note_access' ? 'Opened note' : item.event.replaceAll('_', ' ')}</b><small>{item.occurredAt ? new Date(item.occurredAt).toLocaleString() : 'Time unavailable'}</small></div>
+          <div><b>{item.event === 'note_access' ? 'Opened note / Drive link' : item.event.replaceAll('_', ' ')}</b><small>{item.occurredAt ? new Date(item.occurredAt).toLocaleString() : 'Time unavailable'}</small></div>
           <span className="activity-ip">{item.ipAddress || 'IP unavailable'}</span>
           {item.noteTitle && <small className="activity-note">{item.noteTitle}{item.subject ? ` · ${item.subject}` : ''}</small>}
         </article>)}</div> : <div className="empty-state">No activity recorded yet. Tracking starts with the next account event.</div>}
@@ -697,6 +710,7 @@ function AuthModal({ onClose, onSuccess }) {
   const [college, setCollege] = useState('')
   const [year, setYear] = useState('')
   const [branch, setBranch] = useState('')
+  const [course, setCourse] = useState('')
   const [code, setCode] = useState('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
@@ -706,7 +720,7 @@ function AuthModal({ onClose, onSuccess }) {
     try { onSuccess(await signIn(email, password)) } catch (requestError) { setError(requestError.message) }
   }
   const validateSignup = () => {
-    if ([name, mobile, college, year, branch, email, password].some((value) => !value.trim())) {
+    if ([name, mobile, college, year, branch, course, email, password].some((value) => !value.trim())) {
       setError('Complete every signup field.')
       return false
     }
@@ -717,7 +731,7 @@ function AuthModal({ onClose, onSuccess }) {
   }
   const submitSignup = async () => {
     if (!validateSignup()) return
-    try { onSuccess(await verifySignupCode(email, code, password, name, college, year, branch, mobile)) } catch (requestError) { setError(requestError.message) }
+    try { onSuccess(await verifySignupCode(email, code, password, name, college, year, branch, course, mobile)) } catch (requestError) { setError(requestError.message) }
   }
   const sendSignupCode = async () => {
     if (!validateSignup()) return
@@ -735,6 +749,8 @@ function AuthModal({ onClose, onSuccess }) {
     try { await resetPassword(resetToken, password); setMode('signin'); setMessage('Password updated. Sign in with your new password.'); setError('') } catch (requestError) { setError(requestError.message) }
   }
   const changeMode = (nextMode) => { setMode(nextMode); setStep('form'); setError(''); setMessage(''); setCode('') }
+
+  if (mode === 'signup') return <div className="modal-backdrop"><div className="auth-modal"><button className="modal-close" onClick={onClose}><X size={18} /></button><div className="auth-symbol"><LockKeyhole size={20} /></div><div className="auth-switch"><button onClick={() => changeMode('signin')}>Sign in</button><button className="selected" onClick={() => changeMode('signup')}>Sign up</button><button onClick={() => changeMode('forgot')}>Forgot password</button></div>{step === 'otp' ? <><span className="eyebrow">Verify signup</span><h2>One last<br /><i>step.</i></h2><p className="modal-copy">Enter the code sent to {email} to finish creating your account.</p><label className="modal-label">Signup OTP<input className="otp-input" inputMode="numeric" maxLength="6" value={code} onChange={(event) => setCode(event.target.value)} placeholder="6-digit code" /></label><button className="button button-dark full" onClick={submitSignup} disabled={code.length !== 6}>Verify &amp; create account <ArrowUpRight size={16} /></button></> : <><span className="eyebrow">Create account</span><h2>Sign up for your<br /><i>space.</i></h2><p className="modal-copy">Create your student account with a verified college email.</p><label className="modal-label">Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" required /></label><label className="modal-label">Mobile number<input type="tel" inputMode="tel" autoComplete="tel" maxLength={20} value={mobile} onChange={(event) => setMobile(event.target.value)} placeholder="e.g. +1 555 123 4567" required /></label><label className="modal-label">College<input value={college} onChange={(event) => setCollege(event.target.value)} placeholder="Your college" required /></label><div className="two-fields"><label className="modal-label">Year<select value={year} onChange={(event) => setYear(event.target.value)} required><option value="">Choose year</option>{years.map((item) => <option key={item}>{item}</option>)}</select></label><label className="modal-label">Branch<input value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="Computer Science" required /></label></div><label className="modal-label">Course<input value={course} onChange={(event) => setCourse(event.target.value)} placeholder="e.g. B.Tech" required /></label><label className="modal-label">Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@college.edu" required /></label><label className="modal-label">Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" required /></label><button className="button button-dark full" onClick={sendSignupCode} disabled={!email || password.length < 8}>Send signup OTP <ArrowUpRight size={16} /></button></>}{error && <p className="form-error">{error}</p>}{message && <p className="form-success">{message}</p>}</div></div>
 
   return <div className="modal-backdrop"><div className="auth-modal"><button className="modal-close" onClick={onClose}><X size={18} /></button><div className="auth-symbol"><LockKeyhole size={20} /></div>{mode !== 'reset' && <div className="auth-switch"><button className={mode === 'signin' ? 'selected' : ''} onClick={() => changeMode('signin')}>Sign in</button><button className={mode === 'signup' ? 'selected' : ''} onClick={() => changeMode('signup')}>Sign up</button><button className={mode === 'forgot' ? 'selected' : ''} onClick={() => changeMode('forgot')}>Forgot password</button></div>}{mode === 'forgot' ? <><span className="eyebrow">Reset access</span><h2>Find your<br /><i>way back.</i></h2><p className="modal-copy">Enter your email and we’ll send a reset link.</p><label className="modal-label">Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@college.edu" /></label><button className="button button-dark full" onClick={sendReset} disabled={!email}>Send reset link <Mail size={16} /></button></> : mode === 'reset' ? <><span className="eyebrow">New password</span><h2>Set a fresh<br /><i>start.</i></h2><label className="modal-label">New password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label><button className="button button-dark full" onClick={submitReset} disabled={password.length < 8}>Update password <ArrowUpRight size={16} /></button></> : mode === 'signup' && step === 'otp' ? <><span className="eyebrow">Verify signup</span><h2>One last<br /><i>step.</i></h2><p className="modal-copy">Enter the code sent to {email} to finish creating your account.</p><label className="modal-label">Signup OTP<input className="otp-input" inputMode="numeric" maxLength="6" value={code} onChange={(event) => setCode(event.target.value)} placeholder="• • •  • • •" /></label><button className="button button-dark full" onClick={submitSignup} disabled={code.length !== 6}>Verify & create account <ArrowUpRight size={16} /></button></> : <><span className="eyebrow">{mode === 'signin' ? 'Welcome back' : 'Create account'}</span><h2>{mode === 'signin' ? <>Sign in to your<br /><i>space.</i></> : <>Sign up for your<br /><i>space.</i></>}</h2><p className="modal-copy">{mode === 'signin' ? 'Sign in with your email and password.' : 'Signup requires one email verification code. Sign in does not.'}</p>{mode === 'signup' && <><label className="modal-label">Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></label><label className="modal-label">Mobile number<input type="tel" inputMode="tel" autoComplete="tel" maxLength={20} value={mobile} onChange={(event) => setMobile(event.target.value)} placeholder="e.g. +1 555 123 4567" required /></label><label className="modal-label">College<input value={college} onChange={(event) => setCollege(event.target.value)} placeholder="Your college" /></label><div className="two-fields"><label className="modal-label">Year<input value={year} onChange={(event) => setYear(event.target.value)} placeholder="3rd year" /></label><label className="modal-label">Branch<input value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="Computer Science" /></label></div></>}<label className="modal-label">Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@college.edu" /></label><label className="modal-label">Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label><button className="button button-dark full" onClick={mode === 'signup' ? sendSignupCode : submitSignIn} disabled={!email || password.length < 8}>{mode === 'signup' ? 'Send signup OTP' : 'Sign in'} <ArrowUpRight size={16} /></button></>}{error && <p className="form-error">{error}</p>}{message && <p className="form-success">{message}</p>}</div></div>
 }
