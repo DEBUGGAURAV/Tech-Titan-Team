@@ -11,6 +11,7 @@ import * as XLSX from 'xlsx'
 
 const app = express()
 const port = process.env.PORT || 5000
+app.set('trust proxy', process.env.RENDER ? 1 : false)
 const otpStore = new Map()
 const resetStore = new Map()
 const mailjet = process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY
@@ -25,6 +26,19 @@ const firebaseApp = getApps().length ? getApps()[0] : initializeApp({
 })
 const db = getFirestore(firebaseApp)
 const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean))
+const toIso = (value) => value?.toDate?.().toISOString() || (typeof value === 'string' ? value : '')
+const userActivityCollection = (userId) => db.collection('users').doc(userId).collection('activity')
+const createActivityRecord = (event, req, details = {}) => ({
+  event,
+  ipAddress: req.ip || '',
+  eventAt: FieldValue.serverTimestamp(),
+  ...details,
+})
+const recordUserActivity = (userId, req, event, details) => userActivityCollection(userId).add(createActivityRecord(event, req, details))
+const serializeUser = (snapshot) => {
+  const { passwordHash, createdAt, ...user } = snapshot.data()
+  return { id: snapshot.id, ...user, registeredAt: toIso(createdAt) }
+}
 
 const allowedClientOrigins = new Set([
   ...(process.env.CLIENT_URL || 'http://localhost:5173').split(',').map((origin) => origin.trim()).filter(Boolean),
@@ -61,6 +75,13 @@ const serialize = (snapshot) => ({ id: snapshot.id, ...snapshot.data() })
 app.get('/api/notes', authRequired, async (_req, res) => {
   const snapshot = await db.collection('notes').where('status', '==', 'approved').get()
   res.json(snapshot.docs.map(serialize).sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || ''))))
+})
+app.post('/api/notes/:id/access', authRequired, async (req, res) => {
+  const noteSnapshot = await db.collection('notes').doc(req.params.id).get()
+  if (!noteSnapshot.exists || noteSnapshot.data().status !== 'approved') return res.status(404).json({ message: 'Note not found.' })
+  const note = noteSnapshot.data()
+  await recordUserActivity(req.user.id, req, 'note_access', { noteId: noteSnapshot.id, noteTitle: note.title || '', subject: note.subject || '' })
+  res.json({ recorded: true })
 })
 app.post('/api/notes', authRequired, async (req, res) => {
   const { title, subject, year, folderId, driveLink, status } = req.body
@@ -159,7 +180,32 @@ app.delete('/api/folders/:id', authRequired, adminRequired, async (req, res) => 
 })
 app.get('/api/admin/users', authRequired, adminRequired, async (_req, res) => {
   const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
-  res.json(snapshot.docs.map(serialize))
+  res.json(snapshot.docs.map(serializeUser))
+})
+app.get('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
+  const userSnapshot = await db.collection('users').doc(req.params.id).get()
+  if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
+  const activitySnapshot = await userActivityCollection(req.params.id).orderBy('eventAt', 'desc').limit(100).get()
+  const activity = activitySnapshot.docs.map((snapshot) => {
+    const event = snapshot.data()
+    return { id: snapshot.id, event: event.event || '', ipAddress: event.ipAddress || '', occurredAt: toIso(event.eventAt), noteId: event.noteId || '', noteTitle: event.noteTitle || '', subject: event.subject || '' }
+  })
+  res.json({ user: serializeUser(userSnapshot), activity })
+})
+app.patch('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
+  const { name, college, year, branch } = req.body || {}
+  if (![name, college, year, branch].every((value) => typeof value === 'string' && value.trim())) {
+    return res.status(400).json({ message: 'Name, college, year, and branch are required.' })
+  }
+  const profile = { name: name.trim(), college: college.trim(), year: year.trim(), branch: branch.trim() }
+  if (profile.name.length > 120 || profile.college.length > 200 || profile.year.length > 80 || profile.branch.length > 120) {
+    return res.status(400).json({ message: 'One or more profile fields are too long.' })
+  }
+  const userRef = db.collection('users').doc(req.params.id)
+  const userSnapshot = await userRef.get()
+  if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
+  await userRef.update(profile)
+  res.json({ ...serializeUser(userSnapshot), ...profile })
 })
 app.patch('/api/admin/users/:id/block', authRequired, adminRequired, async (req, res) => {
   await db.collection('users').doc(req.params.id).update({ blocked: Boolean(req.body.blocked) })
@@ -177,7 +223,7 @@ app.patch('/api/admin/users/:id/role', authRequired, adminRequired, async (req, 
 })
 app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
   if (req.params.id === req.user.id) return res.status(400).json({ message: 'You cannot delete your own admin account.' })
-  await db.collection('users').doc(req.params.id).delete()
+  await db.recursiveDelete(db.collection('users').doc(req.params.id))
   res.json({ id: req.params.id, deleted: true })
 })
 app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res) => {
@@ -189,9 +235,29 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
     const note = noteSnapshot.data()
     return { Title: note.title || '', Subject: note.subject || '', Year: note.year || '', FolderId: note.folderId || '', DriveLink: note.driveLink || '', Author: note.author || '', Status: note.status || '', UploadedAt: note.createdAt?.toDate?.().toISOString() || '' }
   })
+  const activityRows = []
+  for (const userSnapshot of snapshot.docs) {
+    const user = userSnapshot.data()
+    const activitySnapshot = await userActivityCollection(userSnapshot.id).orderBy('eventAt', 'asc').get()
+    activitySnapshot.docs.forEach((activitySnapshot) => {
+      const activity = activitySnapshot.data()
+      activityRows.push({
+        Name: user.name || '',
+        Email: user.email || '',
+        Event: activity.event || '',
+        'IP Address': activity.ipAddress || '',
+        'Registered At': toIso(user.createdAt),
+        'Event Time': toIso(activity.eventAt),
+        'Note Title': activity.noteTitle || '',
+        Subject: activity.subject || '',
+        'Note ID': activity.noteId || '',
+      })
+    })
+  }
   const workbook = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Students')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(noteRows), 'Uploaded Notes')
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(activityRows), 'User Activity')
   const output = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
   res.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').attachment('tech-titan-team-students.xlsx').send(output)
 })
@@ -228,8 +294,14 @@ app.post('/api/auth/signin', async (req, res) => {
   if (!snapshot.exists || !(await bcrypt.compare(password || '', snapshot.data().passwordHash || ''))) return res.status(401).json({ message: 'Email or password is incorrect.' })
   const user = snapshot.data()
   if (user.blocked) return res.status(403).json({ message: 'This account is blocked.' })
+  await recordUserActivity(userRef.id, req, 'login')
   const token = jwt.sign({ userId: userRef.id, email: user.email }, process.env.JWT_SECRET || 'development-secret')
   res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, college: user.college || '', year: user.year || '', branch: user.branch || '', role: user.role, blocked: false } })
+})
+
+app.post('/api/auth/logout', authRequired, async (req, res) => {
+  await recordUserActivity(req.user.id, req, 'logout')
+  res.json({ recorded: true })
 })
 
 app.post('/api/auth/change-password', authRequired, async (req, res) => {
@@ -293,7 +365,10 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   const existing = await userRef.get()
   if (existing.exists) return res.status(409).json({ message: 'An account already exists for this email. Sign in instead.' })
   const user = { email: normalizedEmail, name: name.trim(), college: college.trim(), year: typeof year === 'string' ? year.trim() : '', branch: branch.trim(), passwordHash: await bcrypt.hash(password, 12), role: adminEmails.has(normalizedEmail) ? 'admin' : 'student', blocked: false, createdAt: FieldValue.serverTimestamp() }
-  await userRef.set(user)
+  const registrationBatch = db.batch()
+  registrationBatch.set(userRef, user)
+  registrationBatch.set(userActivityCollection(userRef.id).doc(), createActivityRecord('registered', req))
+  await registrationBatch.commit()
   const responseUser = { id: userRef.id, ...user, createdAt: undefined }
   const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, process.env.JWT_SECRET || 'development-secret')
   res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, college: user.college, year: user.year, branch: user.branch, role: user.role, blocked: false } })

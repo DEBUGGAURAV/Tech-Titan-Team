@@ -1,10 +1,17 @@
-const API_URL = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || '/api')
+const API_URL = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || 'https://techtitan-api.onrender.com/api')
 
 async function request(path, options = {}, token) {
-  const response = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) },
-  })
+  let response
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      ...options,
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) },
+    })
+  } catch {
+    const error = new Error('Unable to connect to Notes Sharing Group. The server may be starting; try again shortly.')
+    error.code = 'API_UNREACHABLE'
+    throw error
+  }
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(body.message || 'Request failed')
   return body
@@ -28,7 +35,11 @@ export const getAdminNotes = (token) => request('/admin/notes', {}, token)
 export const updateNote = (id, changes, token) => request(`/notes/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }, token)
 export const deleteNote = (id, token) => request(`/notes/${id}`, { method: 'DELETE' }, token)
 export const getAdminUsers = (token) => request('/admin/users', {}, token)
+export const getAdminUserDetails = (id, token) => request(`/admin/users/${id}`, {}, token)
+export const updateAdminUser = (id, profile, token) => request(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(profile) }, token)
 export const setUserBlocked = (id, blocked, token) => request(`/admin/users/${id}/block`, { method: 'PATCH', body: JSON.stringify({ blocked }) }, token)
 export const setUserRole = (id, role, token) => request(`/admin/users/${id}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }, token)
 export const deleteAdminUser = (id, token) => request(`/admin/users/${id}`, { method: 'DELETE' }, token)
+export const recordNoteAccess = (id, token) => request(`/notes/${id}/access`, { method: 'POST' }, token)
+export const recordLogout = (token) => request('/auth/logout', { method: 'POST' }, token)
 export const getExportUrl = (token) => `${API_URL}/admin/users/export?token=${encodeURIComponent(token)}`

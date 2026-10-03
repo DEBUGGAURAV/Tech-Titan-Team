@@ -4,7 +4,7 @@ import {
   GraduationCap, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Pencil, Plus,
   Search, Settings2, ShieldCheck, Sparkles, UploadCloud, Users, X, Zap,
 } from 'lucide-react'
-import { changePassword, createFolder, createNote, deleteAdminUser, deleteFolder, deleteNote, forgotPassword, getAdminNotes, getAdminUsers, getExportUrl, getFolders, getNotes, requestSignupCode, resetPassword, setUserBlocked, setUserRole, signIn, signUp, updateFolder, updateNote, updateProfile, verifySignupCode } from './api'
+import { changePassword, createFolder, createNote, deleteAdminUser, deleteFolder, deleteNote, forgotPassword, getAdminNotes, getAdminUserDetails, getAdminUsers, getExportUrl, getFolders, getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword, setUserBlocked, setUserRole, signIn, signUp, updateAdminUser, updateFolder, updateNote, updateProfile, verifySignupCode } from './api'
 
 const years = ['1st year', '2nd year', '3rd year', '4th year']
 const subjects = ['Data Structures', 'Database Systems', 'Operating Systems', 'Web Development']
@@ -29,6 +29,7 @@ const students = [
 
 function App() {
   const [view, setView] = useState('home')
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [subject, setSubject] = useState('All notes')
   const [search, setSearch] = useState('')
   const [authOpen, setAuthOpen] = useState(false)
@@ -39,6 +40,8 @@ function App() {
   const [adminUsers, setAdminUsers] = useState([])
   const [adminNotes, setAdminNotes] = useState([])
   const [notice, setNotice] = useState('')
+  const [connectionError, setConnectionError] = useState('')
+  const [connectionAttempt, setConnectionAttempt] = useState(0)
   const signedIn = Boolean(session?.token)
   const isAdmin = session?.user?.role === 'admin'
   const canManageContent = isAdmin || session?.user?.role === 'content_admin'
@@ -54,15 +57,18 @@ function App() {
       if (initialized && hasNewNotes) setNotice('New notes are available in your subject room.')
       knownNoteIds = new Set(nextNotes.map((note) => note.id || note.title))
       initialized = true
+      setConnectionError('')
       setLiveNotes(nextNotes)
-    }).catch(() => { if (active) setLiveNotes([]) })
+    }).catch((error) => {
+      if (active && error.code === 'API_UNREACHABLE') setConnectionError(error.message)
+    })
     refreshNotes()
     const refreshTimer = window.setInterval(refreshNotes, 5000)
     getFolders(session.token).then(setFolders).catch(() => setFolders([]))
     if (isAdmin) getAdminUsers(session.token).then(setAdminUsers).catch(() => setAdminUsers([]))
     if (canManageContent) getAdminNotes(session.token).then(setAdminNotes).catch(() => setAdminNotes([]))
     return () => { active = false; window.clearInterval(refreshTimer) }
-  }, [session, isAdmin, canManageContent])
+  }, [session, isAdmin, canManageContent, connectionAttempt])
 
   const navigate = (nextView) => {
     if (nextView === 'admin' && !canManageContent) {
@@ -94,11 +100,25 @@ function App() {
     setNotice('Profile updated.')
   }
 
-  const handleSignOut = () => {
+  const handleSignOut = async () => {
+    let logoutError = ''
+    try { await recordLogout(session.token) } catch (error) { logoutError = error.message }
     localStorage.removeItem('tech-titan-session')
     setSession(null)
     setView('home')
-    setNotice('You have been signed out.')
+    setNotice(logoutError ? `Signed out, but activity could not be recorded: ${logoutError}` : 'You have been signed out.')
+  }
+
+  const handleNoteAccess = (note) => {
+    if (!note.id) return
+    recordNoteAccess(note.id, session.token).catch((error) => setNotice(`Note access could not be recorded: ${error.message}`))
+  }
+
+  const handleUpdateAdminUser = async (id, profile) => {
+    const updated = await updateAdminUser(id, profile, session.token)
+    setAdminUsers((current) => current.map((user) => user.id === id ? { ...user, ...updated } : user))
+    setNotice('User details updated.')
+    return updated
   }
 
   const handleCreateNote = async (note) => {
@@ -201,7 +221,7 @@ function App() {
       <header className="topbar">
         <button className="brand" onClick={() => setView('home')} aria-label="Go to home">
           <span className="brand-mark"><Zap size={18} fill="currentColor" /></span>
-          <span>tech titan <i>team</i></span>
+          <span>notes sharing <i>group</i></span>
         </button>
         <nav className="desktop-nav" aria-label="Primary navigation">
             {[['notes', 'Notes'], ['students', 'Students'], ...(canManageContent ? [['admin', 'Admin']] : [])].map(([key, label]) => (
@@ -209,17 +229,18 @@ function App() {
           ))}
         </nav>
         <div className="top-actions">
-          <button className="icon-button mobile-menu" aria-label="Open menu"><Menu size={19} /></button>
+          <button className="icon-button mobile-menu" aria-label="Toggle menu" aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen((open) => !open)}><Menu size={19} /></button>
           {signedIn ? <><button className="profile-chip" onClick={() => navigate('profile')}><span className="avatar tiny">{session.user?.name?.slice(0, 2).toUpperCase() || 'TT'}</span><span>{session.user?.name || 'Student'}</span><ChevronDown size={15} /></button><button className="signout-button" onClick={handleSignOut}><LogOut size={16} /> Sign out</button></> : <button className="button button-dark" onClick={() => setAuthOpen(true)}>Sign in <ArrowUpRight size={16} /></button>}
         </div>
       </header>
+      {mobileNavOpen && <nav className="mobile-nav" aria-label="Mobile navigation">{[['notes', 'Notes'], ['students', 'Students'], ...(canManageContent ? [['admin', 'Admin']] : [])].map(([key, label]) => <button key={key} onClick={() => { scrollTo(key); setMobileNavOpen(false) }}>{label}</button>)}</nav>}
 
       <main>
         {view === 'profile' && signedIn ? <ProfileView user={session.user} onSave={handleProfileSave} onBack={() => setView('home')} /> : <>
         <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
-        <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={[...liveNotes, ...notes].filter((note, index, list) => list.findIndex((item) => item.title === note.title) === index)} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
+        <div id="notes">{signedIn ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={[...liveNotes, ...notes].filter((note, index, list) => list.findIndex((item) => item.title === note.title) === index)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} /> : <section className="page-width access-section"><LockKeyhole size={22} /><h2>Sign in to enter the notes room.</h2><p>Use the sign-in button above to access notes and your student space.</p></section>}</div>
         <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
-        {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
+        {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
         {isAdmin && <ContentAdminManager users={adminUsers} onSetRole={handleSetContentRole} />}
         {session?.user?.role === 'content_admin' && <div id="admin"><ContentAdminView folders={folders} notes={adminNotes} onCreateNote={handleAdminNote} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} /></div>}
         </>}
@@ -227,7 +248,7 @@ function App() {
 
       <UploadCta />
 
-      <footer><span>© 2025 Tech Titan Team</span><span className="footer-dot" /><span>Built by students, for students.</span><span className="footer-spacer" /><span>Made with intent <Sparkles size={14} /></span></footer>
+      <footer><span>© 2026 Notes Sharing Group</span><span className="footer-dot" /><span>Built by students, for students.</span><span className="footer-spacer" /><span>Made with intent <Sparkles size={14} /></span></footer>
       {notice && <button className="toast" onClick={() => setNotice('')}>{notice}<X size={14} /></button>}
       {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSuccess={handleAuthSuccess} />}
       {adminOpen && signedIn && <AddNoteModal onClose={() => setAdminOpen(false)} onSubmit={handleCreateNote} />}
@@ -246,20 +267,30 @@ function Home({ onExplore, onSignIn, signedIn }) {
   </>
 }
 
-function NotesView({ subject, setSubject, search, setSearch, notes, folders, studentYear }) {
+function NotesView({ subject, setSubject, search, setSearch, notes, folders, studentYear, connectionError, onRetry, onNoteAccess }) {
   const studentFolders = folders
   const availableSubjects = ['All notes', ...new Set(studentFolders.map((folder) => folder.subject))]
   const selectedFolder = studentFolders.find((folder) => folder.subject === subject)
   const visibleNotes = notes.filter((note) => (subject === 'All notes' || (selectedFolder && (note.folderId ? note.folderId === selectedFolder.id : note.subject === subject))) && `${note.title} ${note.subject}`.toLowerCase().includes(search.toLowerCase()))
-  return <section className="page-width app-page"><div className="view-heading"><div><span className="eyebrow">The library / 01</span><h1>Find your<br /><i>unfair advantage.</i></h1></div><span className="year-badge">{studentYear || 'All years'} subject room</span></div><div className="upload-rule"><UploadCloud size={18} /><span>Folders and subjects are organized by your year. Share a note through the public drop at the bottom of this page.</span></div><div className="toolbar"><div className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes, subjects..." /></div><div className="subject-tabs">{availableSubjects.length > 1 ? availableSubjects.map((item) => <button className={subject === item ? 'subject-tab selected' : 'subject-tab'} key={item} onClick={() => setSubject(item)}>{item}</button>) : <span className="panel-caption">No subject folders yet for this year.</span>}</div></div><div className="notes-list">{visibleNotes.map((note) => <NoteCard key={note.id || note.title} note={note} list />)}{visibleNotes.length === 0 && <div className="empty-state">No approved notes match that search yet.</div>}</div></section>
+  return <section className="page-width app-page"><div className="view-heading"><div><span className="eyebrow">The library / 01</span><h1>Find your<br /><i>unfair advantage.</i></h1></div><span className="year-badge">{studentYear || 'All years'} subject room</span></div>{connectionError && <div className="connection-banner" role="alert"><span><strong>Connection interrupted</strong>{connectionError}</span><button className="button button-dark" onClick={onRetry}>Try again</button></div>}<div className="upload-rule"><UploadCloud size={18} /><span>Folders and subjects are organized by your year. Share a note through the public drop at the bottom of this page.</span></div><div className="toolbar"><div className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes, subjects..." /></div><div className="subject-tabs">{availableSubjects.length > 1 ? availableSubjects.map((item) => <button className={subject === item ? 'subject-tab selected' : 'subject-tab'} key={item} onClick={() => setSubject(item)}>{item}</button>) : <span className="panel-caption">No subject folders yet for this year.</span>}</div></div><div className="notes-list">{visibleNotes.map((note) => <NoteCard key={note.id || note.title} note={note} list onAccess={onNoteAccess} />)}{visibleNotes.length === 0 && <div className="empty-state">No approved notes match that search yet.</div>}</div></section>
 }
 
 function UploadCta() {
   return <section className="upload-cta"><div className="upload-cta-grid" /><div className="upload-cta-copy"><span className="eyebrow">Open drop / 04</span><h2>Have something<br /><i>worth sharing?</i></h2><p>Drop a useful note for the next person figuring it out. No account. No OTP. Just your link.</p></div><a className="upload-cta-button" href={uploadLink} target="_blank" rel="noreferrer"><span className="upload-button-icon"><UploadCloud size={25} /></span><span><small>Anyone can upload</small><b>Send a note <ArrowUpRight size={17} /></b></span></a><span className="upload-stamp">PLAYBOOK<br /><b>DROP</b></span></section>
 }
 
-function NoteCard({ note, featured = false, list = false }) {
-  return <article className={`note-card ${featured ? 'featured' : ''} ${list ? 'list-card' : ''}`}><div className={`file-icon ${note.color || 'blue'}`}><FileText size={24} /><span>{note.type || 'LINK'}</span></div><div className="note-card-body"><div className="card-kicker">{note.subject} <span>·</span> {note.pages || 'Drive link'}</div><h3>{note.title}</h3><div className="card-meta"><span>By {note.author}</span><a className="card-action" href={note.driveLink || '#'} target="_blank" rel="noreferrer"><Download size={15} /> Open Drive</a></div></div></article>
+function NoteCard({ note, featured = false, list = false, onAccess }) {
+  return <article className={`note-card ${featured ? 'featured' : ''} ${list ? 'list-card' : ''}`}>
+    <div className={`file-icon ${note.color || 'blue'}`}><FileText size={24} /><span>{note.type || 'LINK'}</span></div>
+    <div className="note-card-body">
+      <div className="card-kicker">{note.subject} <span>·</span> {note.pages || 'Drive link'}</div>
+      <h3>{note.title}</h3>
+      <div className="card-meta">
+        <span>By {note.author}</span>
+        <a className="card-action" href={note.driveLink || '#'} target="_blank" rel="noreferrer" onClick={() => onAccess?.(note)}><Download size={15} /> Open Drive</a>
+      </div>
+    </div>
+  </article>
 }
 
 function StudentsView({ onProfile }) {
@@ -381,9 +412,12 @@ function LegacyAdminView({ users, notes, folders, token, onCreateFolder, onCreat
   </section>
 }
 
-function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote, onNoteStatus, onBlock, onDelete, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote }) {
+function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote, onNoteStatus, onBlock, onDelete, onEditFolder, onDeleteFolder, onEditNote, onDeleteNote, onUpdateUser }) {
   const [userFilter, setUserFilter] = useState('')
+  const [showAllUsers, setShowAllUsers] = useState(false)
+  const [selectedUser, setSelectedUser] = useState(null)
   const filteredUsers = users.filter((user) => userMatchesQuery(user, userFilter))
+  const visibleUsers = showAllUsers ? filteredUsers : filteredUsers.slice(0, 5)
 
   return <section className="page-width app-page">
     <div className="view-heading"><div><span className="eyebrow">Admin only / 03</span><h1>Keep the room<br /><i>in motion.</i></h1></div><a className="button button-dark" href={getExportUrl(token)} target="_blank" rel="noreferrer"><Download size={17} /> Export workbook</a></div>
@@ -408,13 +442,71 @@ function AdminView({ users, notes, folders, token, onCreateFolder, onCreateNote,
     <div className="admin-table">
       <div className="table-title"><div><span className="eyebrow">Access management</span><h2>Users</h2></div><span className="panel-caption">Only full admins can see this area</span></div>
       <div className="search-box"><Search size={17} /><input type="search" value={userFilter} onChange={(event) => setUserFilter(event.target.value)} placeholder="Find by name, email, college, year, branch, or role" /></div>
-      {filteredUsers.map((user) => <div className="table-row" key={user.id}>
+      {visibleUsers.map((user) => <div className="table-row user-access-row" key={user.id}>
         <span className="file-dot blue"><Users size={16} /></span><span className="row-name"><b>{user.name || 'Unnamed student'}</b><small>{user.email} · {user.role}</small></span><span className={user.blocked ? 'review-pill blocked-pill' : 'review-pill'}>{user.blocked ? 'Blocked' : 'Active'}</span>
-        <button className="button compact-button" onClick={() => onBlock(user.id, !user.blocked)}>{user.blocked ? 'Unblock' : 'Block'}</button><button className="button compact-button danger-button" onClick={() => { if (window.confirm(`Delete ${user.name || user.email}?`)) onDelete(user.id) }}>Delete</button>
+        <div className="user-row-actions"><button className="button compact-button" onClick={() => setSelectedUser(user)}>Details / edit</button><button className="button compact-button" onClick={() => onBlock(user.id, !user.blocked)}>{user.blocked ? 'Unblock' : 'Block'}</button><button className="button compact-button danger-button" onClick={() => { if (window.confirm(`Delete ${user.name || user.email}?`)) onDelete(user.id) }}>Delete</button></div>
       </div>)}
       {filteredUsers.length === 0 && <div className="empty-state">No users match this search.</div>}
+      {filteredUsers.length > 5 && <button className="list-toggle" onClick={() => setShowAllUsers((shown) => !shown)}>{showAllUsers ? 'Show fewer users' : `Show all ${filteredUsers.length} users`} <ChevronDown size={15} className={showAllUsers ? 'list-toggle-open' : ''} /></button>}
     </div>
+    {selectedUser && <AdminUserDetailsModal user={selectedUser} token={token} onClose={() => setSelectedUser(null)} onSave={onUpdateUser} />}
   </section>
+}
+
+function AdminUserDetailsModal({ user, token, onClose, onSave }) {
+  const [profile, setProfile] = useState({ name: user.name || '', college: user.college || '', year: user.year || '', branch: user.branch || '' })
+  const [registeredAt, setRegisteredAt] = useState(user.registeredAt || '')
+  const [activity, setActivity] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    getAdminUserDetails(user.id, token).then((details) => {
+      if (!active) return
+      setProfile({ name: details.user.name || '', college: details.user.college || '', year: details.user.year || '', branch: details.user.branch || '' })
+      setRegisteredAt(details.user.registeredAt || '')
+      setActivity(details.activity)
+    }).catch((requestError) => { if (active) setError(requestError.message) }).finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [user.id, token])
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setSaving(true)
+    setError('')
+    try {
+      const updated = await onSave(user.id, profile)
+      setProfile({ name: updated.name, college: updated.college, year: updated.year, branch: updated.branch })
+    } catch (saveError) { setError(saveError.message) } finally { setSaving(false) }
+  }
+
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <section className="auth-modal user-details-modal" role="dialog" aria-modal="true" aria-labelledby="user-details-title">
+      <button className="modal-close" onClick={onClose} aria-label="Close user details"><X size={18} /></button>
+      <span className="eyebrow">Access management</span>
+      <h2 id="user-details-title">User details</h2>
+      <p className="modal-copy">{user.email} · {registeredAt ? `Registered ${new Date(registeredAt).toLocaleString()}` : 'Registration date unavailable'}</p>
+      <form className="user-detail-form" onSubmit={submit}>
+        <label className="modal-label">Full name<input required maxLength={120} value={profile.name} onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></label>
+        <label className="modal-label">College<input required maxLength={200} value={profile.college} onChange={(event) => setProfile({ ...profile, college: event.target.value })} /></label>
+        <label className="modal-label">Year<input required maxLength={80} value={profile.year} onChange={(event) => setProfile({ ...profile, year: event.target.value })} /></label>
+        <label className="modal-label">Branch<input required maxLength={120} value={profile.branch} onChange={(event) => setProfile({ ...profile, branch: event.target.value })} /></label>
+        {error && <p className="form-error user-detail-error">{error}</p>}
+        <button className="button button-dark" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save profile'} <Check size={16} /></button>
+      </form>
+      <div className="user-activity">
+        <div className="panel-title"><span>Account activity</span><Clock3 size={17} /></div>
+        <p className="panel-help">Registration, sign-in, sign-out, and opened notes. IP addresses are visible only to admins.</p>
+        {loading ? <div className="empty-state">Loading activity…</div> : activity.length ? <div className="user-activity-list">{activity.map((item) => <article className="user-activity-row" key={item.id}>
+          <div><b>{item.event === 'note_access' ? 'Opened note' : item.event.replaceAll('_', ' ')}</b><small>{item.occurredAt ? new Date(item.occurredAt).toLocaleString() : 'Time unavailable'}</small></div>
+          <span className="activity-ip">{item.ipAddress || 'IP unavailable'}</span>
+          {item.noteTitle && <small className="activity-note">{item.noteTitle}{item.subject ? ` · ${item.subject}` : ''}</small>}
+        </article>)}</div> : <div className="empty-state">No activity recorded yet. Tracking starts with the next account event.</div>}
+      </div>
+    </section>
+  </div>
 }
 
 function ContentAdminManager({ users, onSetRole }) {
@@ -479,14 +571,28 @@ function AdminManageContent({ folders, notes, onEditFolder, onDeleteFolder, onEd
   const session = JSON.parse(localStorage.getItem('tech-titan-session') || 'null')
   const isAdmin = session?.user?.role === 'admin'
   const [editingNote, setEditingNote] = useState(null)
+  const [folderSearch, setFolderSearch] = useState('')
+  const [noteSearch, setNoteSearch] = useState('')
+  const [showAllFolders, setShowAllFolders] = useState(false)
+  const [showAllNotes, setShowAllNotes] = useState(false)
+  const normalizedFolderSearch = folderSearch.trim().toLowerCase()
+  const normalizedNoteSearch = noteSearch.trim().toLowerCase()
+  const filteredFolders = folders.filter((folder) => `${folder.subject} ${folder.year}`.toLowerCase().includes(normalizedFolderSearch))
+  const filteredNotes = notes.filter((note) => `${note.title} ${note.subject} ${note.year} ${note.author} ${note.status}`.toLowerCase().includes(normalizedNoteSearch))
+  const visibleFolders = showAllFolders ? filteredFolders : filteredFolders.slice(0, 5)
+  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 5)
   return <div className="admin-workspace">
     {isAdmin && <section className="admin-panel"><div className="panel-title"><span>Manage folders</span><GraduationCap size={17} /></div>
-      {folders.map((folder) => <div className="manage-row" key={folder.id}><span><b>{folder.subject}</b><small>{folder.year}</small></span><button className="button compact-button" onClick={() => onEditFolder(folder)}>Edit</button><button className="button compact-button danger-button" onClick={() => onDeleteFolder(folder)}>Delete</button></div>)}
-      {folders.length === 0 && <div className="empty-state">No subject folders yet.</div>}
+      <div className="search-box management-search"><Search size={16} /><input type="search" value={folderSearch} onChange={(event) => setFolderSearch(event.target.value)} placeholder="Search folders by subject or year" /></div>
+      {visibleFolders.map((folder) => <div className="manage-row" key={folder.id}><span><b>{folder.subject}</b><small>{folder.year}</small></span><button className="button compact-button" onClick={() => onEditFolder(folder)}>Edit</button><button className="button compact-button danger-button" onClick={() => onDeleteFolder(folder)}>Delete</button></div>)}
+      {filteredFolders.length === 0 && <div className="empty-state">{folders.length ? 'No folders match this search.' : 'No subject folders yet.'}</div>}
+      {filteredFolders.length > 5 && <button className="list-toggle" onClick={() => setShowAllFolders((shown) => !shown)}>{showAllFolders ? 'Show fewer folders' : `Show all ${filteredFolders.length} folders`} <ChevronDown size={15} className={showAllFolders ? 'list-toggle-open' : ''} /></button>}
     </section>}
     <section className="admin-panel"><div className="panel-title"><span>Manage published content</span><Settings2 size={17} /></div>
-      {notes.map((note) => <div className="manage-row" key={note.id}><span><b>{note.title}</b><small>{note.year} · {note.subject} · {note.status}</small></span><button className="button compact-button" onClick={() => setEditingNote(note)}>Edit</button><button className="button compact-button danger-button" onClick={() => onDeleteNote(note)}>Delete</button></div>)}
-      {notes.length === 0 && <div className="empty-state">No published or submitted notes yet.</div>}
+      <div className="search-box management-search"><Search size={16} /><input type="search" value={noteSearch} onChange={(event) => setNoteSearch(event.target.value)} placeholder="Search notes by title, subject, or status" /></div>
+      {visibleNotes.map((note) => <div className="manage-row" key={note.id}><span><b>{note.title}</b><small>{note.year} · {note.subject} · {note.status}</small></span><button className="button compact-button" onClick={() => setEditingNote(note)}>Edit</button><button className="button compact-button danger-button" onClick={() => onDeleteNote(note)}>Delete</button></div>)}
+      {filteredNotes.length === 0 && <div className="empty-state">{notes.length ? 'No notes match this search.' : 'No published or submitted notes yet.'}</div>}
+      {filteredNotes.length > 5 && <button className="list-toggle" onClick={() => setShowAllNotes((shown) => !shown)}>{showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`} <ChevronDown size={15} className={showAllNotes ? 'list-toggle-open' : ''} /></button>}
     </section>
     {editingNote && <EditPublishedNoteModal note={editingNote} folders={folders} canChangeFolder={isAdmin} onClose={() => setEditingNote(null)} onSave={onEditNote} />}
   </div>
