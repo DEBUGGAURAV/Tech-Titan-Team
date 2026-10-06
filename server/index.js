@@ -256,14 +256,16 @@ const describeNotePermissions = (user) => {
   const labels = { uploadNotes: 'Upload', editNotes: 'Edit', deleteNotes: 'Delete', reviewNotes: 'Review' }
   return notePermissionNames.filter((permission) => user.permissions?.[permission] === true).map((permission) => labels[permission]).join(', ')
 }
-const createNoticeRecord = async ({ title, message, type = 'general' }) => {
+const createNoticeRecord = async ({ title, message, type = 'general', link = '' }) => {
   const safeTitle = String(title || '').trim()
   const safeMessage = String(message || '').trim()
+  const safeLink = typeof link === 'string' ? link.trim().slice(0, 500) : ''
   if (!safeTitle || !safeMessage) return null
   const payload = {
     title: safeTitle.slice(0, 120),
     message: safeMessage.slice(0, 1000),
-    type: ['general', 'note', 'update'].includes(type) ? type : 'general',
+    type: ['general', 'note', 'update', 'alert'].includes(type) ? type : 'general',
+    ...(safeLink ? { link: safeLink } : {}),
     createdAt: FieldValue.serverTimestamp(),
     expiresAt: Date.now() + noticeExpiryMs,
   }
@@ -753,7 +755,15 @@ app.get('/api/notices', authRequired, async (_req, res) => {
     const notices = snapshot.docs
       .map((doc) => {
         const notice = doc.data()
-        return { id: doc.id, title: notice.title, message: notice.message, type: notice.type || 'general', createdAt: toIso(notice.createdAt), expiresAt: typeof notice.expiresAt === 'number' ? notice.expiresAt : now + noticeExpiryMs }
+        return { 
+          id: doc.id, 
+          title: notice.title, 
+          message: notice.message, 
+          type: notice.type || 'general', 
+          link: notice.link || '',
+          createdAt: toIso(notice.createdAt), 
+          expiresAt: typeof notice.expiresAt === 'number' ? notice.expiresAt : now + noticeExpiryMs 
+        }
       })
       .filter((notice) => (notice.expiresAt || now) > now)
       .sort((left, right) => Number(right.expiresAt || 0) - Number(left.expiresAt || 0))
@@ -771,10 +781,10 @@ app.get('/api/notices', authRequired, async (_req, res) => {
 })
 app.post('/api/notices', authRequired, dbWriteLimiter, async (req, res) => {
   if (!canManageNoticeBoard(req.user)) return res.status(403).json({ message: 'Notice board management access required.' })
-  const { title, message, type } = req.body || {}
+  const { title, message, type, link } = req.body || {}
   if (typeof title !== 'string' || !title.trim()) return res.status(400).json({ message: 'Notice title is required.' })
   if (typeof message !== 'string' || !message.trim()) return res.status(400).json({ message: 'Notice details are required.' })
-  const notice = await createNoticeRecord({ title, message, type })
+  const notice = await createNoticeRecord({ title, message, type, link })
   if (!notice) return res.status(400).json({ message: 'Notice could not be created.' })
   res.status(201).json(notice)
 })
@@ -792,11 +802,12 @@ app.patch('/api/notices/:id', authRequired, dbWriteLimiter, async (req, res) => 
   const noticeRef = noticeBoardCollection().doc(req.params.id)
   const noticeSnapshot = await noticeRef.get()
   if (!noticeSnapshot.exists) return res.status(404).json({ message: 'Notice not found.' })
-  const { title, message, type } = req.body || {}
+  const { title, message, type, link } = req.body || {}
   const updates = { updatedAt: FieldValue.serverTimestamp() }
   if (typeof title === 'string' && title.trim()) updates.title = title.trim()
   if (typeof message === 'string' && message.trim()) updates.message = message.trim()
   if (typeof type === 'string' && (type === 'general' || type === 'alert')) updates.type = type
+  if (typeof link === 'string') updates.link = link.trim().slice(0, 500)
   await noticeRef.update(updates)
   invalidateCache('notices:active')
   const updatedSnapshot = await noticeRef.get()
@@ -806,6 +817,7 @@ app.patch('/api/notices/:id', authRequired, dbWriteLimiter, async (req, res) => 
     title: data.title,
     message: data.message,
     type: data.type || 'general',
+    link: data.link || '',
     createdAt: toIso(data.createdAt),
     updatedAt: toIso(data.updatedAt),
     expiresAt: typeof data.expiresAt === 'number' ? data.expiresAt : Date.now() + noticeExpiryMs

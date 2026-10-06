@@ -15,7 +15,7 @@ const NotesView = lazy(() => import('./components/NotesView'))
 const StudentsView = lazy(() => import('./components/StudentsView'))
 import Sidebar from './components/Sidebar'
 const ProfileView = lazy(() => import('./components/ProfileView'))
-import NoticeBoard from './components/NoticeBoard'
+import NoticeBoard, { FormattedNoticeMessage } from './components/NoticeBoard'
 const AdminView = lazy(() => import('./components/AdminView'))
 import { AddNoteModal } from './components/UploadForms'
 import { ContentAdminManager, ContentAdminView } from './components/ContentAdmin'
@@ -332,9 +332,9 @@ function App() {
     } catch (error) { setNotice(error.message) }
   }
 
-  const handleCreateNotice = async ({ title, message, type = 'general' }) => {
+  const handleCreateNotice = async ({ title, message, type = 'general', link = '' }) => {
     try {
-      const created = await createNotice({ title, message, type }, session.token)
+      const created = await createNotice({ title, message, type, link }, session.token)
       setNoticeBoard((current) => [created, ...current])
       setNotice('Notice published to the board.')
       return true
@@ -549,7 +549,7 @@ function App() {
               <Bell size={18} />
             </span>
             <div className="notice-text-wrapper">
-              <p className="notice-message-text">{notice}</p>
+              <p className="notice-message-text"><FormattedNoticeMessage text={notice} /></p>
             </div>
           </div>
           <div className="notice-timer-bar"></div>

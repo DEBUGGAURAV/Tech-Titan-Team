@@ -3,11 +3,75 @@ import {
   Sparkles, Trash2, Edit3, MessageSquare, Pin, Bell, Flame, 
   Search, ShieldAlert, ShieldCheck, Radio, CheckCircle2, 
   Send, X, Clock, Layers, Filter, AlertTriangle, Megaphone, Terminal,
-  Pencil, Check, RotateCcw
+  Pencil, Check, RotateCcw, ExternalLink, ArrowUpRight, Link2, Globe
 } from 'lucide-react';
 
+// Regex to capture web links (http, https, www)
+const URL_REGEX = /(https?:\/\/[^\s<]+[^<.,:;"')\]\s]|www\.[^\s<]+[^<.,:;"')\]\s])/gi;
+
+export function extractFirstUrl(text) {
+  if (!text) return '';
+  const match = String(text).match(URL_REGEX);
+  if (!match) return '';
+  const url = match[0];
+  return url.startsWith('http') ? url : `https://${url}`;
+}
+
+export function FormattedNoticeMessage({ text }) {
+  if (!text) return null;
+  const raw = String(text);
+  const parts = [];
+  let lastIndex = 0;
+  let match;
+  const regex = new RegExp(URL_REGEX.source, 'gi');
+
+  while ((match = regex.exec(raw)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(raw.slice(lastIndex, match.index));
+    }
+    const rawUrl = match[0];
+    const href = rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`;
+    parts.push(
+      <a
+        key={match.index}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '4px',
+          padding: '2px 8px',
+          margin: '0 3px',
+          borderRadius: '6px',
+          background: 'linear-gradient(135deg, rgba(0, 242, 254, 0.22) 0%, rgba(56, 189, 248, 0.28) 100%)',
+          border: '1px solid rgba(0, 242, 254, 0.55)',
+          color: '#00f2fe',
+          fontWeight: '800',
+          fontSize: '0.86rem',
+          textDecoration: 'none',
+          verticalAlign: 'baseline',
+          boxShadow: '0 0 10px rgba(0, 242, 254, 0.25)',
+          transition: 'all 0.15s ease'
+        }}
+        title={`Open link: ${href}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        Click Here <ArrowUpRight size={13} />
+      </a>
+    );
+    lastIndex = regex.lastIndex;
+  }
+
+  if (lastIndex < raw.length) {
+    parts.push(raw.slice(lastIndex));
+  }
+
+  return <>{parts}</>;
+}
+
 export default function NoticeBoard({ notices = [], canManage, onCreateNotice, onDeleteNotice, onEditNotice }) {
-  const [draft, setDraft] = useState({ title: '', message: '', type: 'general' });
+  const [draft, setDraft] = useState({ title: '', message: '', type: 'general', link: '' });
   const [showAll, setShowAll] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState('all'); // 'all' | 'general' | 'alert'
@@ -16,7 +80,7 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
 
   // In-place edit state for notices
   const [editingNoticeId, setEditingNoticeId] = useState(null);
-  const [editDraft, setEditDraft] = useState({ title: '', message: '', type: 'general' });
+  const [editDraft, setEditDraft] = useState({ title: '', message: '', type: 'general', link: '' });
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   const presetTopics = [
@@ -32,13 +96,15 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
     if (!draft.title.trim() || !draft.message.trim() || isSubmitting) return;
     setIsSubmitting(true);
     try {
+      const detectedLink = draft.link?.trim() || extractFirstUrl(draft.message);
       const saved = await onCreateNotice({ 
         title: draft.title.trim(), 
         message: draft.message.trim(),
-        type: draft.type || 'general'
+        type: draft.type || 'general',
+        link: detectedLink
       });
       if (saved) {
-        setDraft({ title: '', message: '', type: 'general' });
+        setDraft({ title: '', message: '', type: 'general', link: '' });
         setIsComposerOpen(false);
       }
     } finally {
@@ -51,13 +117,14 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
     setEditDraft({
       title: notice.title || '',
       message: notice.message || '',
-      type: notice.type || 'general'
+      type: notice.type || 'general',
+      link: notice.link || extractFirstUrl(notice.message) || ''
     });
   };
 
   const cancelEditing = () => {
     setEditingNoticeId(null);
-    setEditDraft({ title: '', message: '', type: 'general' });
+    setEditDraft({ title: '', message: '', type: 'general', link: '' });
   };
 
   const handleSaveEdit = async (e, id) => {
@@ -66,10 +133,12 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
     if (!onEditNotice) return;
     setIsSavingEdit(true);
     try {
+      const detectedLink = editDraft.link?.trim() || extractFirstUrl(editDraft.message);
       const success = await onEditNotice(id, {
         title: editDraft.title.trim(),
         message: editDraft.message.trim(),
-        type: editDraft.type || 'general'
+        type: editDraft.type || 'general',
+        link: detectedLink
       });
       if (success) {
         setEditingNoticeId(null);
@@ -474,6 +543,36 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
                   resize: 'vertical'
                 }}
               />
+            </div>
+
+            {/* Action / Document Link Field */}
+            <div style={{ marginBottom: '22px' }}>
+              <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: '800', color: '#e0f2fe', marginBottom: '6px' }}>
+                Attachment / Action Link <span style={{ color: '#94a3b8', fontWeight: '500' }}>(Optional — e.g. Google Drive, Exam Form, Web Link)</span>
+              </label>
+              <div style={{ position: 'relative' }}>
+                <input
+                  type="url"
+                  value={draft.link || ''}
+                  onChange={(e) => setDraft({ ...draft, link: e.target.value })}
+                  placeholder="https://drive.google.com/... or https://forms.gle/..."
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px 12px 38px',
+                    borderRadius: '12px',
+                    background: 'rgba(10, 18, 34, 0.9)',
+                    border: '1.5px solid rgba(0, 242, 254, 0.3)',
+                    color: '#e0f2fe',
+                    fontSize: '0.94rem',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+                <Link2 size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: '#38bdf8' }} />
+              </div>
+              <small style={{ color: '#94a3b8', fontSize: '0.78rem', display: 'block', marginTop: '6px' }}>
+                💡 <b>Smart Link Feature:</b> You can paste a link here OR directly in the message text. It will automatically show as a modern <b>"Click Here"</b> button for students!
+              </small>
             </div>
 
             {/* Actions */}
@@ -914,6 +1013,33 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
                       />
                     </div>
 
+                    {/* Action / Attachment Link Input */}
+                    <div style={{ marginBottom: '18px' }}>
+                      <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: '800', color: '#e0f2fe', marginBottom: '5px' }}>
+                        Attachment / Action Link <span style={{ color: '#94a3b8', fontWeight: '500' }}>(Optional)</span>
+                      </label>
+                      <div style={{ position: 'relative' }}>
+                        <input
+                          type="url"
+                          value={editDraft.link || ''}
+                          onChange={(e) => setEditDraft(prev => ({ ...prev, link: e.target.value }))}
+                          placeholder="https://drive.google.com/... or https://forms.gle/..."
+                          style={{
+                            width: '100%',
+                            padding: '10px 14px 10px 36px',
+                            borderRadius: '10px',
+                            background: 'rgba(8, 14, 28, 0.95)',
+                            border: '1.5px solid rgba(0, 242, 254, 0.4)',
+                            color: '#e0f2fe',
+                            fontSize: '0.92rem',
+                            outline: 'none',
+                            boxSizing: 'border-box'
+                          }}
+                        />
+                        <Link2 size={15} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: '#38bdf8' }} />
+                      </div>
+                    </div>
+
                     {/* Edit Form Actions */}
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
                       <button
@@ -1009,9 +1135,52 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
                           margin: 0,
                           whiteSpace: 'pre-line'
                         }}>
-                          {notice.message}
+                          <FormattedNoticeMessage text={notice.message} />
                         </p>
                       </div>
+
+                      {/* Prominent Action Button for Links ("Click Here to Open Link") */}
+                      {(notice.link || extractFirstUrl(notice.message)) && (() => {
+                        const targetUrl = notice.link || extractFirstUrl(notice.message);
+                        const href = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
+                        return (
+                          <div style={{ marginBottom: '14px' }}>
+                            <a
+                              href={href}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '8px',
+                                padding: '10px 20px',
+                                borderRadius: '12px',
+                                background: isAlert
+                                  ? 'linear-gradient(135deg, rgba(244, 63, 94, 0.25) 0%, rgba(251, 113, 133, 0.3) 100%)'
+                                  : 'linear-gradient(135deg, rgba(0, 242, 254, 0.22) 0%, rgba(56, 189, 248, 0.28) 100%)',
+                                border: isAlert
+                                  ? '1.5px solid rgba(244, 63, 94, 0.65)'
+                                  : '1.5px solid rgba(0, 242, 254, 0.65)',
+                                color: isAlert ? '#ffe4e6' : '#e0f2fe',
+                                fontWeight: '900',
+                                fontSize: '0.92rem',
+                                textDecoration: 'none',
+                                boxShadow: isAlert
+                                  ? '0 4px 18px rgba(244, 63, 94, 0.35)'
+                                  : '0 4px 18px rgba(0, 242, 254, 0.3)',
+                                transition: 'all 0.18s ease',
+                                cursor: 'pointer'
+                              }}
+                              title={`Open target link: ${href}`}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <ExternalLink size={16} style={{ color: isAlert ? '#fb7185' : '#00f2fe' }} />
+                              <span>Click Here to Open Link</span>
+                              <ArrowUpRight size={16} style={{ color: isAlert ? '#fb7185' : '#00f2fe' }} />
+                            </a>
+                          </div>
+                        );
+                      })()}
 
                       {/* Footer Dispatch Stamp */}
                       <div style={{
