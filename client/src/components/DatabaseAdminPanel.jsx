@@ -4,6 +4,7 @@ import {
   ArchiveRestore, Clock, ShieldAlert, BookOpen, Folder, Users, 
   Bell, FileText, Search, Tag, CheckCircle2, AlertTriangle, Layers
 } from 'lucide-react';
+import { API_URL } from '../api';
 
 export default function DatabaseAdminPanel({ token }) {
   const [collections, setCollections] = useState([]);
@@ -20,7 +21,7 @@ export default function DatabaseAdminPanel({ token }) {
   const fetchCollections = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/admin/collections', { headers: { authorization: 'Bearer ' + token } });
+      const res = await fetch(`${API_URL}/admin/collections`, { headers: { authorization: 'Bearer ' + token } });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Failed to fetch collections');
       setCollections(data);
@@ -30,7 +31,7 @@ export default function DatabaseAdminPanel({ token }) {
 
   const fetchDocs = async (name) => {
     try {
-      const res = await fetch('/api/admin/collections/' + name, { headers: { authorization: 'Bearer ' + token } });
+      const res = await fetch(`${API_URL}/admin/collections/` + name, { headers: { authorization: 'Bearer ' + token } });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Failed to fetch documents');
       setDocs(prev => ({ ...prev, [name]: data }));
@@ -50,7 +51,7 @@ export default function DatabaseAdminPanel({ token }) {
       : 'Delete document ' + id + ' from ' + name + '? (It will be safely moved to the Reverse Store for 48 hours).';
     if (!window.confirm(confirmMsg)) return;
     try {
-      const res = await fetch('/api/admin/collections/' + name + '/' + id, { method: 'DELETE', headers: { authorization: 'Bearer ' + token } });
+      const res = await fetch(`${API_URL}/admin/collections/` + name + '/' + id, { method: 'DELETE', headers: { authorization: 'Bearer ' + token } });
       if (!res.ok) throw new Error('Delete failed');
       setMessage(isTrash ? 'Permanently deleted item ' + id : 'Deleted ' + id + ' (Safely moved to Reverse Store)');
       fetchCollections();
@@ -66,7 +67,7 @@ export default function DatabaseAdminPanel({ token }) {
       : 'Delete ALL documents from collection ' + name + '? (They will be moved to the Reverse Store for 48 hours).';
     if (!window.confirm(confirmMsg)) return;
     try {
-      const res = await fetch('/api/admin/collections/' + name, { method: 'DELETE', headers: { authorization: 'Bearer ' + token } });
+      const res = await fetch(`${API_URL}/admin/collections/` + name, { method: 'DELETE', headers: { authorization: 'Bearer ' + token } });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Delete failed');
       setMessage(isTrash ? 'Emptied trash' : 'Moved ' + data.count + ' documents to Reverse Store');
@@ -79,7 +80,7 @@ export default function DatabaseAdminPanel({ token }) {
   const restoreEach = async (id, title) => {
     if (!window.confirm('Reverse & restore ' + (title ? '\"' + title + '\"' : 'this document') + ' to its original collection?')) return;
     try {
-      const res = await fetch('/api/admin/collections/restore/' + id, { method: 'POST', headers: { authorization: 'Bearer ' + token } });
+      const res = await fetch(`${API_URL}/admin/collections/restore/` + id, { method: 'POST', headers: { authorization: 'Bearer ' + token } });
       if (!res.ok) throw new Error('Restore failed');
       setMessage('Successfully reversed & restored: ' + (title || id));
       fetchCollections();
@@ -96,8 +97,8 @@ export default function DatabaseAdminPanel({ token }) {
     
     try {
       const endpoint = isCategory
-        ? '/api/admin/collections/restore-category/' + category
-        : '/api/admin/collections/restore-all';
+        ? `${API_URL}/admin/collections/restore-category/` + category
+        : `${API_URL}/admin/collections/restore-all`;
       const res = await fetch(endpoint, { method: 'POST', headers: { authorization: 'Bearer ' + token } });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Restore failed');

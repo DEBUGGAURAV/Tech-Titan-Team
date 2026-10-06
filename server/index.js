@@ -146,19 +146,159 @@ const serializeUser = (snapshot) => {
   return { id: snapshot.id, ...user, registeredAt: toIso(createdAt) }
 }
 
-const allowedClientOrigins = new Set([
-  ...(process.env.CLIENT_URL || 'http://localhost:5173').split(',').map((origin) => origin.trim()).filter(Boolean),
+// --- THREAT MITIGATION: SECURITY HEADERS (OWASP / ZERO-TRUST) ---
+app.disable('x-powered-by')
+
+app.use((req, res, next) => {
+  // Prevent Clickjacking attacks
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+  // Prevent MIME sniffing exploits
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  // Enable legacy XSS filter
+  res.setHeader('X-XSS-Protection', '1; mode=block')
+  // Prevent referrer leakage of sensitive routes/tokens
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  // Restrict sensitive browser APIs
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  // Enforce HTTPS over reverse proxies
+  if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload')
+  }
+  next()
+})
+
+// --- THREAT MITIGATION: PROTOTYPE POLLUTION & PARAMETER TAMPERING DEFENSE ---
+app.use((req, _res, next) => {
+  const sanitize = (obj) => {
+    if (!obj || typeof obj !== 'object') return
+    for (const key of Object.keys(obj)) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        delete obj[key]
+      } else if (typeof obj[key] === 'object') {
+        sanitize(obj[key])
+      }
+    }
+  }
+  if (req.body) sanitize(req.body)
+  if (req.query) sanitize(req.query)
+  if (req.params) sanitize(req.params)
+  next()
+})
+
+// --- THREAT MITIGATION: IN-MEMORY RATE LIMITING (BRUTE FORCE & DOS MITIGATION) ---
+const rateLimitStore = new Map()
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, record] of rateLimitStore.entries()) {
+    if (record.resetAt <= now) rateLimitStore.delete(key)
+  }
+}, 5 * 60 * 1000)
+
+const createRateLimiter = ({ windowMs = 60 * 1000, max = 150, message = 'Too many requests. Please slow down.' }) => {
+  return (req, res, next) => {
+    const ip = req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown'
+    const key = `${req.baseUrl || req.path}:${ip}`
+    const now = Date.now()
+    let record = rateLimitStore.get(key)
+    if (!record || record.resetAt <= now) {
+      record = { count: 1, resetAt: now + windowMs }
+      rateLimitStore.set(key, record)
+      return next()
+    }
+    record.count += 1
+    if (record.count > max) {
+      const retryAfter = Math.ceil((record.resetAt - now) / 1000)
+      res.setHeader('Retry-After', retryAfter)
+      return res.status(429).json({ message, retryAfter })
+    }
+    next()
+  }
+}
+
+const generalLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 300,
+  message: 'Too many requests to the server. Please slow down.'
+})
+
+const authLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: 'Too many sign-in attempts. Please wait 15 minutes before trying again.'
+})
+
+const otpLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 8,
+  message: 'Too many verification code requests. Please wait 10 minutes before requesting another code.'
+})
+
+// --- ROBUST, MULTI-ORIGIN & THREAT-PROTECTED CORS CONFIGURATION ---
+const configuredClientOrigins = (process.env.CLIENT_URL || 'http://localhost:5173')
+  .split(',')
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
+  .filter(Boolean)
+
+const explicitlyAllowedOrigins = new Set([
+  ...configuredClientOrigins,
+  'https://notessharinggroup.onrender.com',
   'https://notessharingroup.onrender.com',
+  'https://techtitan-api.onrender.com',
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5000',
 ])
-app.use(cors({
+
+const isAllowedOrigin = (origin) => {
+  // Allow requests without Origin header (mobile apps, server-to-server, curl, Postman, same-origin)
+  if (!origin) return true
+  const cleanOrigin = origin.trim().replace(/\/+$/, '')
+  if (explicitlyAllowedOrigins.has(cleanOrigin)) return true
+
+  // Localhost / 127.0.0.1 on ANY port
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(cleanOrigin)) return true
+
+  // Local Area Network (LAN) testing on phones/tablets via Wi-Fi (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+  if (/^https?:\/\/(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/i.test(cleanOrigin)) return true
+
+  // Any Render deployment subdomain (*.onrender.com)
+  if (/^https:\/\/[a-zA-Z0-9-]+\.onrender\.com$/i.test(cleanOrigin)) return true
+
+  // Vercel / Netlify preview & production domains
+  if (/^https:\/\/[a-zA-Z0-9-]+\.(vercel\.app|netlify\.app|pages\.dev)$/i.test(cleanOrigin)) return true
+
+  return false
+}
+
+const corsOptions = {
   origin(origin, callback) {
-    const isLocalOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin || '')
-    if (!origin || allowedClientOrigins.has(origin) || isLocalOrigin) return callback(null, true)
-    return callback(new Error('Origin is not allowed by CORS.'))
+    if (isAllowedOrigin(origin)) {
+      return callback(null, true)
+    }
+    // CRITICAL FIX: Return callback(null, false) instead of throwing new Error('Origin is not allowed by CORS.').
+    // Throwing an Error crashes Express with a 500 status code.
+    // Returning false safely tells the browser that CORS is not granted without crashing the server.
+    return callback(null, false)
   },
-}))
-app.use(compression());
-app.use(express.json())
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400, // Cache preflight OPTIONS responses for 24 hours
+}
+
+app.use(cors(corsOptions))
+app.options('*', cors(corsOptions))
+
+// Threat Mitigation: Request body size limit to prevent Denial of Service (DoS) memory exhaustion
+app.use(express.json({ limit: '10mb' }))
+app.use(express.urlencoded({ extended: true, limit: '10mb' }))
+
+// Apply general rate limiting across /api endpoints
+app.use('/api', generalLimiter)
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'tech-titan-team' }))
 
@@ -869,7 +1009,7 @@ app.delete('/api/admin/collections/:name', authRequired, adminRequired, async (r
   } catch (err) { res.status(500).json({ message: err.message }) }
 })
 
-app.post('/api/auth/request-otp', async (req, res) => {
+app.post('/api/auth/request-otp', otpLimiter, async (req, res) => {
   try {
     const { email, purpose = 'signup' } = req.body || {}
     const normalizedEmail = email?.trim().toLowerCase()
@@ -962,7 +1102,7 @@ app.post('/api/auth/request-otp', async (req, res) => {
   }
 })
 
-app.post('/api/auth/signin', async (req, res) => {
+app.post('/api/auth/signin', authLimiter, async (req, res) => {
   const { email, password } = req.body || {}
   if (!email || !email.trim() || !password || !password.trim()) {
     return res.status(400).json({ message: 'All fields are mandatory. Please enter both email and password.' })
@@ -1084,6 +1224,20 @@ app.patch('/api/me', authRequired, async (req, res) => {
   if (profile.course.length > 120) return res.status(400).json({ message: 'Course must be 120 characters or fewer.' })
   await db.collection('users').doc(req.user.id).update(profile)
   res.json({ id: req.user.id, email: req.user.email, ...profile, role: req.user.role })
+})
+
+// --- THREAT MITIGATION: GLOBAL ERROR HANDLER & INFORMATION DISCLOSURE GUARD ---
+// Intercepts all unhandled exceptions, sanitizes CORS rejections, and prevents stack trace leakage
+app.use((err, req, res, _next) => {
+  console.error('[Global Security Guard]:', err.message || err)
+  if (res.headersSent) return
+  if (err.message && err.message.toLowerCase().includes('cors')) {
+    return res.status(403).json({ message: 'Cross-Origin Request Blocked by Security Policy' })
+  }
+  const statusCode = err.status || err.statusCode || 500
+  res.status(statusCode).json({
+    message: statusCode === 500 ? 'An unexpected internal server error occurred.' : err.message,
+  })
 })
 
 const ensureAdmin = async () => {
