@@ -16,7 +16,7 @@ export default function NotesView({
     (subject === 'All notes' || (selectedFolder && (note.folderId ? note.folderId === selectedFolder.id : note.subject === subject))) &&
     `${note.title} ${note.subject}`.toLowerCase().includes(search.toLowerCase())
   );
-  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 9);
+  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 8);
 
   return (
     <section className="page-width">
@@ -64,7 +64,7 @@ export default function NotesView({
         </div>
       )}
 
-      {filteredNotes.length > 9 && (
+      {filteredNotes.length > 8 && (
         <div className="center-row">
           <button className="button button-ghost" onClick={() => setShowAllNotes((shown) => !shown)}>
             {showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`}
@@ -78,8 +78,9 @@ export default function NotesView({
   );
 }
 
-function LatestUploadsPanel({ notes, newUploadCount, onDismiss, onNoteAccess }) {
-  if (!notes.length) return null;
+function LatestUploadsPanel({ notes = [], newUploadCount, onDismiss, onNoteAccess }) {
+  const displayNotes = notes.slice(0, 8);
+  if (!displayNotes.length) return null;
 
   return (
     <section className="latest" aria-label="Latest uploads">
@@ -88,7 +89,7 @@ function LatestUploadsPanel({ notes, newUploadCount, onDismiss, onNoteAccess }) 
           <span className="eyebrow"><span className="live-dot" /> fresh from the library</span>
           <h2>Latest uploads</h2>
         </div>
-        <span className="chip">{notes.length} in the feed</span>
+        <span className="chip">{displayNotes.length} in the feed</span>
       </div>
 
       {newUploadCount > 0 && (
@@ -102,7 +103,7 @@ function LatestUploadsPanel({ notes, newUploadCount, onDismiss, onNoteAccess }) 
       )}
 
       <div className="latest-grid">
-        {notes.map((note, index) => (
+        {displayNotes.map((note, index) => (
           <a key={note.id || note.title} className={`latest-item ${index === 0 ? 'first' : ''}`} href={note.driveLink || '#'} target="_blank" rel="noreferrer" onClick={() => onNoteAccess?.(note)}>
             <span className="rank">{index === 0 ? 'New' : String(index + 1).padStart(2, '0')}</span>
             <div>

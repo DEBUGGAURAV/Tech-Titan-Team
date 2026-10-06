@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { 
   LayoutDashboard, BookOpen, Users, ShieldCheck, Zap, X, 
-  Settings2, LogOut, ArrowUpRight, GraduationCap, Building2, Mail, ShieldAlert
+  Settings2, LogOut, ArrowUpRight, GraduationCap, Building2, Mail, ShieldAlert, Megaphone
 } from 'lucide-react';
 
 export default function Sidebar({
@@ -10,6 +10,7 @@ export default function Sidebar({
 }) {
   const items = [
     ['home', 'Home', LayoutDashboard],
+    ['notices', 'Notice Board', Megaphone],
     ['notes', 'Library', BookOpen],
     ['students', 'Community', Users],
     ...(canManageContent ? [['admin', 'Admin Panel', ShieldCheck]] : []),

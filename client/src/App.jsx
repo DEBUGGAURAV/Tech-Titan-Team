@@ -515,14 +515,18 @@ function App() {
             </div>
           ) : (
             <>
+              {signedIn && (
+                <div id="notices" style={{ paddingTop: '8px' }}>
+                  <NoticeBoard notices={noticeBoard} canManage={false} />
+                </div>
+              )}
               <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
               <div id="notes">
                 {signedIn
-                  ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 9)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} />
+                  ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 8)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} />
                   : <section className="page-width access-section card"><LockKeyhole size={32} /><div><h2>Sign in to enter the library.</h2><p>Unlock premium notes and your student space.</p></div></section>}
               </div>
               <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
-              {signedIn && <NoticeBoard notices={noticeBoard} canManage={false} />}
             </>
           )}
         </Suspense></main>
