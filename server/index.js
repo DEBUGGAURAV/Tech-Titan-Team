@@ -26,14 +26,113 @@ const resetStore = new Map()
 const mailjet = process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY
   ? Mailjet.apiConnect(process.env.MAILJET_API_KEY, process.env.MAILJET_SECRET_KEY)
   : null
-const firebaseApp = getApps().length ? getApps()[0] : initializeApp({
-  credential: cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  }),
+let rawFirebaseApp = null
+let rawDb = null
+
+const initFirebase = () => {
+  if (rawDb && rawFirebaseApp) return true
+  if (getApps().length) {
+    rawFirebaseApp = getApps()[0]
+    try {
+      rawDb = getFirestore(rawFirebaseApp)
+      return true
+    } catch (e) {
+      console.warn('[Firebase] Firestore retrieval warning:', e.message)
+    }
+  }
+
+  // 1. Try full JSON service account if provided (raw JSON or base64)
+  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.SERVICE_ACCOUNT_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
+  if (serviceAccountJson) {
+    try {
+      const trimmed = serviceAccountJson.trim()
+      const jsonStr = trimmed.startsWith('{') ? trimmed : Buffer.from(trimmed, 'base64').toString('utf-8')
+      const parsed = JSON.parse(jsonStr)
+      if (parsed.project_id && parsed.client_email && parsed.private_key) {
+        rawFirebaseApp = initializeApp({
+          credential: cert({
+            projectId: parsed.project_id,
+            clientEmail: parsed.client_email,
+            privateKey: parsed.private_key.replace(/\\n/g, '\n'),
+          }),
+        })
+        rawDb = getFirestore(rawFirebaseApp)
+        console.log(`[Firebase] Initialized via service account JSON for project: ${parsed.project_id}`)
+        return true
+      }
+    } catch (err) {
+      console.warn('[Firebase] JSON service account parse warning:', err.message)
+    }
+  }
+
+  // 2. Try individual environment variables with fallback project ID and sanitized formatting
+  const projectId = (process.env.FIREBASE_PROJECT_ID || process.env.PROJECT_ID || 'tech-titan-team').trim().replace(/^["']|["']$/g, '')
+  const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || process.env.CLIENT_EMAIL || '').trim().replace(/^["']|["']$/g, '')
+  let privateKey = (process.env.FIREBASE_PRIVATE_KEY || process.env.PRIVATE_KEY || '').trim().replace(/^["']|["']$/g, '')
+  if (privateKey) {
+    privateKey = privateKey.replace(/\\n/g, '\n')
+  }
+
+  if (projectId && clientEmail && privateKey) {
+    try {
+      rawFirebaseApp = initializeApp({
+        credential: cert({
+          projectId,
+          clientEmail,
+          privateKey,
+        }),
+      })
+      rawDb = getFirestore(rawFirebaseApp)
+      console.log(`[Firebase] Initialized with credentials for project: ${projectId}`)
+      return true
+    } catch (err) {
+      console.error('[Firebase] Failed to initialize with provided credentials:', err.message)
+    }
+  }
+
+  // 3. Try initializeApp with project ID or Application Default Credentials
+  try {
+    rawFirebaseApp = initializeApp({ projectId: projectId || 'tech-titan-team' })
+    rawDb = getFirestore(rawFirebaseApp)
+    console.log(`[Firebase] Initialized with application defaults for project: ${projectId}`)
+    return true
+  } catch (err) {
+    console.warn('[Firebase] Application Default Credentials init notice:', err.message)
+  }
+
+  console.error('========================================================================')
+  console.error('⚠️ [CONFIGURATION NOTICE]: Firebase Admin credentials missing or incomplete!')
+  console.error('In your Render dashboard (techtitan-api -> Environment), verify:')
+  console.error('  FIREBASE_PROJECT_ID   = tech-titan-team')
+  console.error('  FIREBASE_CLIENT_EMAIL = (your service account email)')
+  console.error('  FIREBASE_PRIVATE_KEY  = (your private key starting with -----BEGIN PRIVATE KEY-----)')
+  console.error('========================================================================')
+  return false
+}
+
+initFirebase()
+
+const isFirebaseReady = () => Boolean(rawDb)
+
+// Proxy around Firestore to prevent app crash if credentials are unset during initial deployment
+const db = new Proxy({}, {
+  get(_target, prop) {
+    if (!rawDb) initFirebase()
+    if (rawDb && typeof rawDb[prop] !== 'undefined') {
+      return typeof rawDb[prop] === 'function' ? rawDb[prop].bind(rawDb) : rawDb[prop]
+    }
+    if (prop === 'collection') {
+      return (collName) => {
+        if (!rawDb) initFirebase()
+        if (rawDb) return rawDb.collection(collName)
+        throw new Error('Database is not initialized. Please configure FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY in Render environment.')
+      }
+    }
+    return () => {
+      throw new Error('Database is not initialized. Please configure FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY in Render environment.')
+    }
+  }
 })
-const db = getFirestore(firebaseApp)
 const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean))
 const noticeBoardCollection = () => db.collection('noticeBoard')
 const noticeExpiryMs = 5 * 24 * 60 * 60 * 1000 // 5 days automatic expiration
@@ -300,7 +399,19 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 // Apply general rate limiting across /api endpoints
 app.use('/api', generalLimiter)
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'tech-titan-team' }))
+app.get('/api/health', (_req, res) => {
+  const ready = isFirebaseReady()
+  const missing = []
+  if (!process.env.FIREBASE_CLIENT_EMAIL) missing.push('FIREBASE_CLIENT_EMAIL')
+  if (!process.env.FIREBASE_PRIVATE_KEY) missing.push('FIREBASE_PRIVATE_KEY')
+  res.json({
+    ok: true,
+    service: 'tech-titan-team',
+    status: 'online',
+    database: ready ? 'connected' : 'pending_configuration',
+    ...(missing.length > 0 ? { notice: 'Configure variables in Render Dashboard -> Environment', missing } : {}),
+  })
+})
 
 const authRequired = async (req, res, next) => {
   try {
@@ -1255,11 +1366,23 @@ const ensureAdmin = async () => {
 }
 
 const startServer = async () => {
-  await ensureAdmin()
-  await pruneExpiredNotices()
+  try {
+    if (isFirebaseReady()) {
+      await ensureAdmin()
+      await pruneExpiredNotices()
+    } else {
+      console.warn('[Startup] Database credentials pending in Render environment. API server is active; configure FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY in Render dashboard to activate database.')
+    }
+  } catch (err) {
+    console.warn('[Startup Warning]:', err.message)
+  }
+
   setInterval(() => {
-    pruneExpiredNotices().catch(() => {})
+    if (isFirebaseReady()) {
+      pruneExpiredNotices().catch(() => {})
+    }
   }, 60 * 60 * 1000)
+
   app.listen(port, () => console.log(`Nexus Core API running on http://localhost:${port}`))
 }
 

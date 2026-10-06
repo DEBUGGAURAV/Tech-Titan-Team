@@ -12,7 +12,7 @@ services:
       - key: CLIENT_URL
         value: https://notessharinggroup.onrender.com
       - key: FIREBASE_PROJECT_ID
-        sync: false
+        value: tech-titan-team
       - key: FIREBASE_CLIENT_EMAIL
         sync: false
       - key: FIREBASE_PRIVATE_KEY
