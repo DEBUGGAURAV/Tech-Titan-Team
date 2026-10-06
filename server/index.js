@@ -455,11 +455,11 @@ const authLimiter = createRateLimiter({
   keyPrefix: 'auth_signin'
 })
 
-// 5. Verification OTP Limiter (5 requests per 10 min per IP)
+// 5. Verification OTP Limiter (3 requests per 5 min per IP)
 const otpLimiter = createRateLimiter({
-  windowMs: 10 * 60 * 1000,
-  max: 5,
-  message: 'Too many verification code requests. Please wait 10 minutes before requesting another code.',
+  windowMs: 5 * 60 * 1000,
+  max: 3,
+  message: 'Too many verification code requests. Please wait 5 minutes before requesting another code.',
   keyPrefix: 'auth_otp'
 })
 
