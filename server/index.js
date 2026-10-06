@@ -358,52 +358,109 @@ app.use((req, _res, next) => {
   next()
 })
 
-// --- THREAT MITIGATION: IN-MEMORY RATE LIMITING (BRUTE FORCE & DOS MITIGATION) ---
+// --- THREAT MITIGATION: MULTI-TIER RATE LIMITING & DATABASE ACCESS PROTECTION ---
 const rateLimitStore = new Map()
+
+// Auto-cleanup stale entries every 2 minutes; cap store size to prevent memory leaks
 setInterval(() => {
   const now = Date.now()
   for (const [key, record] of rateLimitStore.entries()) {
     if (record.resetAt <= now) rateLimitStore.delete(key)
   }
-}, 5 * 60 * 1000)
+  if (rateLimitStore.size > 10000) {
+    rateLimitStore.clear()
+  }
+}, 2 * 60 * 1000)
 
-const createRateLimiter = ({ windowMs = 60 * 1000, max = 150, message = 'Too many requests. Please slow down.' }) => {
+const getClientIp = (req) => {
+  const forwarded = req.headers['x-forwarded-for']
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim()
+  }
+  return req.ip || req.socket?.remoteAddress || 'unknown-client'
+}
+
+const createRateLimiter = ({ 
+  windowMs = 60 * 1000, 
+  max = 120, 
+  message = 'Too many requests. Please slow down and try again later.',
+  keyPrefix = 'general'
+}) => {
   return (req, res, next) => {
-    const ip = req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown'
-    const key = `${req.baseUrl || req.path}:${ip}`
+    // Health checks do not consume rate limit quotas
+    if (req.path === '/api/health') return next()
+
+    const ip = getClientIp(req)
+    const key = `${keyPrefix}:${ip}`
     const now = Date.now()
     let record = rateLimitStore.get(key)
+
     if (!record || record.resetAt <= now) {
       record = { count: 1, resetAt: now + windowMs }
       rateLimitStore.set(key, record)
+      res.setHeader('RateLimit-Limit', max)
+      res.setHeader('RateLimit-Remaining', Math.max(0, max - 1))
+      res.setHeader('RateLimit-Reset', Math.ceil(record.resetAt / 1000))
       return next()
     }
+
     record.count += 1
+    const remaining = Math.max(0, max - record.count)
+    res.setHeader('RateLimit-Limit', max)
+    res.setHeader('RateLimit-Remaining', remaining)
+    res.setHeader('RateLimit-Reset', Math.ceil(record.resetAt / 1000))
+
     if (record.count > max) {
       const retryAfter = Math.ceil((record.resetAt - now) / 1000)
       res.setHeader('Retry-After', retryAfter)
-      return res.status(429).json({ message, retryAfter })
+      return res.status(429).json({ 
+        message, 
+        retryAfter,
+        code: 'RATE_LIMIT_EXCEEDED' 
+      })
     }
     next()
   }
 }
 
+// 1. General API read/browse rate limiter (120 req / min per IP)
 const generalLimiter = createRateLimiter({
   windowMs: 60 * 1000,
-  max: 300,
-  message: 'Too many requests to the server. Please slow down.'
+  max: 120,
+  message: 'Traffic limit reached. Please wait a moment before sending more requests.',
+  keyPrefix: 'api_general'
 })
 
+// 2. Database Write / Mutation Limiter (max 25 mutations per min to protect Firestore quota)
+const dbWriteLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 25,
+  message: 'Database write limit reached. Please wait a moment before modifying more records.',
+  keyPrefix: 'db_write'
+})
+
+// 3. Heavy Admin Operations Limiter (max 12 operations per min)
+const heavyAdminLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 12,
+  message: 'Administrative batch operation limit reached. Please wait a moment.',
+  keyPrefix: 'admin_heavy'
+})
+
+// 4. Authentication Limiter (12 attempts per 15 min per IP)
 const authLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: 'Too many sign-in attempts. Please wait 15 minutes before trying again.'
+  max: 12,
+  message: 'Too many sign-in attempts. Please wait 15 minutes before trying again.',
+  keyPrefix: 'auth_signin'
 })
 
+// 5. Verification OTP Limiter (5 requests per 10 min per IP)
 const otpLimiter = createRateLimiter({
   windowMs: 10 * 60 * 1000,
-  max: 8,
-  message: 'Too many verification code requests. Please wait 10 minutes before requesting another code.'
+  max: 5,
+  message: 'Too many verification code requests. Please wait 10 minutes before requesting another code.',
+  keyPrefix: 'auth_otp'
 })
 
 // --- ROBUST, MULTI-ORIGIN & THREAT-PROTECTED CORS CONFIGURATION ---
@@ -494,8 +551,8 @@ const authRequired = async (req, res, next) => {
     if (!token) return res.status(401).json({ message: 'Sign in required.' })
     const identity = jwt.verify(token, jwtSecret)
 
-    // Check memory cache first (TTL: 2 minutes)
-    const cachedUser = getFromCache(`user:${identity.userId}`, 120000)
+    // Check memory cache first (TTL: 3 minutes)
+    const cachedUser = getFromCache(`user:${identity.userId}`, 180000)
     if (cachedUser) {
       if (cachedUser.blocked) return res.status(403).json({ message: 'This account is blocked.' })
       req.user = cachedUser
@@ -542,7 +599,7 @@ const serializePublicNote = (snapshot) => {
 
 app.get('/api/notes', authRequired, async (_req, res) => {
   try {
-    const cached = getFromCache('notes:public', 60000)
+    const cached = getFromCache('notes:public', 90000)
     if (cached) return res.json(cached)
 
     const snapshot = await db.collection('notes').where('status', '==', 'approved').get()
@@ -559,7 +616,7 @@ app.get('/api/notes', authRequired, async (_req, res) => {
     res.status(500).json({ message: 'Unable to load notes right now.' })
   }
 })
-app.post('/api/notes/:id/access', authRequired, async (req, res) => {
+app.post('/api/notes/:id/access', authRequired, dbWriteLimiter, async (req, res) => {
   try {
     const noteSnapshot = await db.collection('notes').doc(req.params.id).get()
     if (!noteSnapshot.exists || noteSnapshot.data().status !== 'approved') return res.status(404).json({ message: 'Note not found.' })
@@ -573,7 +630,7 @@ app.post('/api/notes/:id/access', authRequired, async (req, res) => {
     res.status(500).json({ message: 'Failed to record note access.' })
   }
 })
-app.post('/api/notes', authRequired, async (req, res) => {
+app.post('/api/notes', authRequired, dbWriteLimiter, async (req, res) => {
   const { title, subject, year, folderId, driveLink, status } = req.body
   if (!title || !subject || !year || !driveLink) return res.status(400).json({ message: 'Title, year, subject, and Drive link are required.' })
   const canPublish = hasNotePermission(req.user, 'uploadNotes')
@@ -595,7 +652,7 @@ app.post('/api/notes', authRequired, async (req, res) => {
   }
   res.status(201).json({ id: created.id, ...note, createdAt: new Date().toISOString() })
 })
-app.patch('/api/notes/:id', authRequired, async (req, res) => {
+app.patch('/api/notes/:id', authRequired, dbWriteLimiter, async (req, res) => {
   const changes = req.body && typeof req.body === 'object' ? { ...req.body } : {}
   const fields = Object.keys(changes)
   const contentFields = fields.filter((field) => field !== 'status')
@@ -637,7 +694,7 @@ app.patch('/api/notes/:id', authRequired, async (req, res) => {
   }
   res.json({ id: req.params.id, ...changes })
 })
-app.delete('/api/notes/:id', authRequired, async (req, res) => {
+app.delete('/api/notes/:id', authRequired, dbWriteLimiter, async (req, res) => {
   if (!hasNotePermission(req.user, 'deleteNotes')) return res.status(403).json({ message: 'Note deletion access required.' })
   await db.collection('notes').doc(req.params.id).delete()
   invalidateCache('notes:public')
@@ -659,7 +716,7 @@ app.get('/api/admin/notes', authRequired, async (req, res) => {
 })
 app.get('/api/folders', authRequired, async (_req, res) => {
   try {
-    const cached = getFromCache('folders:all', 60000)
+    const cached = getFromCache('folders:all', 120000)
     if (cached) return res.json(cached)
 
     const snapshot = await db.collection('folders').get()
@@ -678,7 +735,7 @@ app.get('/api/folders', authRequired, async (_req, res) => {
 })
 app.get('/api/notices', authRequired, async (_req, res) => {
   try {
-    const cached = getFromCache('notices:active', 45000)
+    const cached = getFromCache('notices:active', 60000)
     if (cached) return res.json(cached)
 
     const now = Date.now()
@@ -702,7 +759,7 @@ app.get('/api/notices', authRequired, async (_req, res) => {
     res.status(500).json({ message: 'Unable to load notices right now.' })
   }
 })
-app.post('/api/notices', authRequired, async (req, res) => {
+app.post('/api/notices', authRequired, dbWriteLimiter, async (req, res) => {
   if (!canManageNoticeBoard(req.user)) return res.status(403).json({ message: 'Notice board management access required.' })
   const { title, message, type } = req.body || {}
   if (typeof title !== 'string' || !title.trim()) return res.status(400).json({ message: 'Notice title is required.' })
@@ -711,7 +768,7 @@ app.post('/api/notices', authRequired, async (req, res) => {
   if (!notice) return res.status(400).json({ message: 'Notice could not be created.' })
   res.status(201).json(notice)
 })
-app.delete('/api/notices/:id', authRequired, async (req, res) => {
+app.delete('/api/notices/:id', authRequired, dbWriteLimiter, async (req, res) => {
   if (!canManageNoticeBoard(req.user)) return res.status(403).json({ message: 'Notice board management access required.' })
   const noticeRef = noticeBoardCollection().doc(req.params.id)
   const noticeSnapshot = await noticeRef.get()
@@ -720,7 +777,7 @@ app.delete('/api/notices/:id', authRequired, async (req, res) => {
   invalidateCache('notices:active')
   res.json({ id: noticeSnapshot.id, deleted: true })
 })
-app.patch('/api/notices/:id', authRequired, async (req, res) => {
+app.patch('/api/notices/:id', authRequired, dbWriteLimiter, async (req, res) => {
   if (!canManageNoticeBoard(req.user)) return res.status(403).json({ message: 'Notice board management access required.' })
   const noticeRef = noticeBoardCollection().doc(req.params.id)
   const noticeSnapshot = await noticeRef.get()
@@ -744,7 +801,7 @@ app.patch('/api/notices/:id', authRequired, async (req, res) => {
     expiresAt: typeof data.expiresAt === 'number' ? data.expiresAt : Date.now() + noticeExpiryMs
   })
 })
-app.post('/api/folders', authRequired, adminRequired, async (req, res) => {
+app.post('/api/folders', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   const { subject, year } = req.body
   if (!subject || !year) return res.status(400).json({ message: 'Subject and year are required.' })
   const existingFolders = await db.collection('folders').where('year', '==', year).get()
@@ -756,7 +813,7 @@ app.post('/api/folders', authRequired, adminRequired, async (req, res) => {
   invalidateCache('folders:all')
   res.status(201).json({ id: created.id, ...folder, createdAt: new Date().toISOString() })
 })
-app.patch('/api/folders/:id', authRequired, adminRequired, async (req, res) => {
+app.patch('/api/folders/:id', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   const { subject, year } = req.body
   if (!subject || !year) return res.status(400).json({ message: 'Subject and year are required.' })
   const folderRef = db.collection('folders').doc(req.params.id)
@@ -777,7 +834,7 @@ app.patch('/api/folders/:id', authRequired, adminRequired, async (req, res) => {
   invalidateCache('folders:all', 'notes:public')
   res.json({ id: req.params.id, name: subject, subject, year })
 })
-app.delete('/api/folders/:id', authRequired, adminRequired, async (req, res) => {
+app.delete('/api/folders/:id', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   const folderRef = db.collection('folders').doc(req.params.id)
   const folderSnapshot = await folderRef.get()
   if (!folderSnapshot.exists) return res.status(404).json({ message: 'Folder not found.' })
@@ -859,7 +916,7 @@ app.delete('/api/admin/users/:userId/activity', authRequired, adminRequired, asy
   res.json({ userId, deletedCount: activitySnapshot.size, deleted: true })
 })
 
-app.patch('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
+app.patch('/api/admin/users/:id', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   const { name, email, mobile, college, year, branch, course, role } = req.body || {}
   if (![name, mobile, college, year, branch, course].every((value) => typeof value === 'string' && value.trim())) {
     return res.status(400).json({ message: 'Name, mobile number, college, year, branch, and course are required.' })
@@ -890,9 +947,10 @@ app.patch('/api/admin/users/:id', authRequired, adminRequired, async (req, res) 
     status: 'completed',
   })
   await batch.commit()
+  invalidateCache(`user:${req.params.id}`, 'admin:users')
   res.json({ ...serializeUser(userSnapshot), ...profile })
 })
-app.patch('/api/admin/users/:id/block', authRequired, adminRequired, async (req, res) => {
+app.patch('/api/admin/users/:id/block', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   const userRef = db.collection('users').doc(req.params.id)
   const userSnapshot = await userRef.get()
   if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
@@ -902,9 +960,10 @@ app.patch('/api/admin/users/:id/block', authRequired, adminRequired, async (req,
   batch.update(userRef, { blocked })
   batch.set(adminActionsCollection().doc(), createAdminAction(req, target, blocked ? 'user_blocked' : 'user_unblocked'))
   await batch.commit()
+  invalidateCache(`user:${req.params.id}`, 'admin:users')
   res.json({ id: userSnapshot.id, blocked })
 })
-app.patch('/api/admin/users/:id/permissions', authRequired, adminRequired, async (req, res) => {
+app.patch('/api/admin/users/:id/permissions', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   const incomingPermissions = req.body?.permissions || {}
   const fullAdmin = req.body?.fullAdmin === true
   if (!incomingPermissions || typeof incomingPermissions !== 'object' || Array.isArray(incomingPermissions) || Object.keys(incomingPermissions).some((key) => !notePermissionNames.includes(key) || typeof incomingPermissions[key] !== 'boolean')) {
@@ -1061,7 +1120,7 @@ const archiveAndDeleteUser = async (req, userSnapshot) => {
   return userSnapshot.id
 }
 
-app.delete('/api/admin/users', authRequired, adminRequired, async (req, res) => {
+app.delete('/api/admin/users', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   const snapshot = await db.collection('users').get()
   const targets = snapshot.docs.filter((userSnapshot) => userSnapshot.data().role !== 'admin')
   let deletedCount = 0
@@ -1069,24 +1128,28 @@ app.delete('/api/admin/users', authRequired, adminRequired, async (req, res) => 
     const results = await Promise.allSettled(targets.slice(index, index + 10).map((userSnapshot) => archiveAndDeleteUser(req, userSnapshot)))
     deletedCount += results.filter((result) => result.status === 'fulfilled').length
     const failed = results.find((result) => result.status === 'rejected')
-    if (failed) return res.status(500).json({ message: `${failed.reason.message} ${deletedCount} of ${targets.length} non-admin user(s) were deleted.` })
+    if (failed) {
+      invalidateCache('admin:users')
+      return res.status(500).json({ message: `${failed.reason.message} ${deletedCount} of ${targets.length} non-admin user(s) were deleted.` })
+    }
   }
+  invalidateCache('admin:users')
   res.json({ deletedCount })
 })
 
-app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
+app.delete('/api/admin/users/:id', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   if (req.params.id === req.user.id) return res.status(400).json({ message: 'You cannot delete your own admin account.' })
   const userSnapshot = await db.collection('users').doc(req.params.id).get()
   if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
   try {
     await archiveAndDeleteUser(req, userSnapshot)
+    invalidateCache(`user:${req.params.id}`, 'admin:users')
     res.json({ id: req.params.id, deleted: true })
   } catch (error) {
     res.status(403).json({ message: error.message })
   }
 })
-app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res) => {
-  await pruneExpiredNotices()
+app.get('/api/admin/users/export', authRequired, adminRequired, heavyAdminLimiter, async (_req, res) => {
   const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
   const users = snapshot.docs.map(serialize)
   const deletedSnapshot = await deletedAccountsCollection().orderBy('deletedAt', 'desc').get()
@@ -1190,7 +1253,7 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
   res.set('Cache-Control', 'no-store').header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').attachment('tech-titan-team-students.xlsx').send(output)
 })
 
-app.get('/api/admin/collections', authRequired, adminRequired, async (req, res) => {
+app.get('/api/admin/collections', authRequired, adminRequired, heavyAdminLimiter, async (req, res) => {
   try {
     const cached = getFromCache('admin:collections', 60000)
     if (cached) return res.json(cached)
@@ -1241,7 +1304,7 @@ app.get('/api/admin/collections', authRequired, adminRequired, async (req, res) 
   }
 })
 
-app.get('/api/admin/collections/:name', authRequired, adminRequired, async (req, res) => {
+app.get('/api/admin/collections/:name', authRequired, adminRequired, heavyAdminLimiter, async (req, res) => {
   try {
     const snapshot = await db.collection(req.params.name).limit(100).get()
     res.json(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })))
@@ -1254,7 +1317,7 @@ app.get('/api/admin/collections/:name', authRequired, adminRequired, async (req,
   }
 })
 
-app.post('/api/admin/collections/deletedData/:id/restore', authRequired, adminRequired, async (req, res) => {
+app.post('/api/admin/collections/deletedData/:id/restore', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   try {
     const trashRef = db.collection('deletedData').doc(req.params.id)
     const trashSnap = await trashRef.get()
@@ -1266,12 +1329,12 @@ app.post('/api/admin/collections/deletedData/:id/restore', authRequired, adminRe
     
     // Remove from trash
     await trashRef.delete()
-    
+    invalidateCache('admin:collections', 'notes:public', 'folders:all')
     res.json({ success: true })
   } catch (err) { res.status(500).json({ message: err.message }) }
 })
 
-app.post('/api/admin/collections/restore/:id', authRequired, adminRequired, async (req, res) => {
+app.post('/api/admin/collections/restore/:id', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   try {
     const trashRef = db.collection('deletedData').doc(req.params.id)
     const trashSnap = await trashRef.get()
@@ -1282,11 +1345,12 @@ app.post('/api/admin/collections/restore/:id', authRequired, adminRequired, asyn
       await db.collection(docData.originalCollection).doc(docData.originalId).set(docData.data || {})
     }
     await trashRef.delete()
+    invalidateCache('admin:collections', 'notes:public', 'folders:all')
     res.json({ success: true })
   } catch (err) { res.status(500).json({ message: err.message }) }
 })
 
-app.post('/api/admin/collections/restore-all', authRequired, adminRequired, async (req, res) => {
+app.post('/api/admin/collections/restore-all', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   try {
     const snapshot = await db.collection('deletedData').get()
     const batch = db.batch()
@@ -1299,11 +1363,12 @@ app.post('/api/admin/collections/restore-all', authRequired, adminRequired, asyn
       batch.delete(doc.ref)
     })
     await batch.commit()
+    invalidateCache('admin:collections', 'notes:public', 'folders:all')
     res.json({ success: true, count: snapshot.size })
   } catch (err) { res.status(500).json({ message: err.message }) }
 })
 
-app.post('/api/admin/collections/restore-category/:category', authRequired, adminRequired, async (req, res) => {
+app.post('/api/admin/collections/restore-category/:category', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   try {
     const snapshot = await db.collection('deletedData').where('originalCollection', '==', req.params.category).get()
     const batch = db.batch()
@@ -1316,11 +1381,12 @@ app.post('/api/admin/collections/restore-category/:category', authRequired, admi
       batch.delete(doc.ref)
     })
     await batch.commit()
+    invalidateCache('admin:collections', 'notes:public', 'folders:all')
     res.json({ success: true, count: snapshot.size })
   } catch (err) { res.status(500).json({ message: err.message }) }
 })
 
-app.delete('/api/admin/collections/:name/:id', authRequired, adminRequired, async (req, res) => {
+app.delete('/api/admin/collections/:name/:id', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   try {
     if (req.params.name === 'deletedData') {
       await db.collection(req.params.name).doc(req.params.id).delete()
@@ -1338,11 +1404,12 @@ app.delete('/api/admin/collections/:name/:id', authRequired, adminRequired, asyn
       }
       await docRef.delete()
     }
+    invalidateCache('admin:collections', 'notes:public', 'folders:all')
     res.json({ success: true })
   } catch (err) { res.status(500).json({ message: err.message }) }
 })
 
-app.delete('/api/admin/collections/:name', authRequired, adminRequired, async (req, res) => {
+app.delete('/api/admin/collections/:name', authRequired, adminRequired, dbWriteLimiter, async (req, res) => {
   try {
     const snapshot = await db.collection(req.params.name).get()
     if (req.params.name === 'deletedData') {
@@ -1492,7 +1559,7 @@ app.post('/api/auth/logout', authRequired, async (req, res) => {
   res.json({ recorded: true })
 })
 
-app.post('/api/auth/change-password', authRequired, async (req, res) => {
+app.post('/api/auth/change-password', authRequired, dbWriteLimiter, async (req, res) => {
   const { currentPassword, newPassword } = req.body
   if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
     return res.status(400).json({ message: 'Enter your current password and a new password of at least 8 characters.' })
@@ -1507,6 +1574,7 @@ app.post('/api/auth/change-password', authRequired, async (req, res) => {
     return res.status(400).json({ message: 'Choose a password different from your current password.' })
   }
   await userRef.update({ passwordHash: await bcrypt.hash(newPassword, 12) })
+  invalidateCache(`user:${req.user.id}`)
   res.json({ message: 'Password changed successfully.' })
 })
 
@@ -1514,7 +1582,7 @@ app.post('/api/auth/signup', async (req, res) => {
   res.status(400).json({ message: 'Email verification is required. Request a signup code and verify it to create an account.' })
 })
 
-app.post('/api/auth/forgot-password', async (req, res) => {
+app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   const normalizedEmail = req.body.email?.toLowerCase().trim()
   const userRef = db.collection('users').doc(Buffer.from(normalizedEmail || '').toString('base64url'))
   const snapshot = await userRef.get()
@@ -1531,16 +1599,17 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   res.json({ message: 'If that email has an account, a password reset link has been sent.' })
 })
 
-app.post('/api/auth/reset-password', async (req, res) => {
+app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
   const { token, password } = req.body
   const reset = resetStore.get(token)
   if (!reset || reset.expires < Date.now() || !password || password.length < 8) return res.status(400).json({ message: 'This reset link is invalid or expired.' })
   await db.collection('users').doc(reset.userId).update({ passwordHash: await bcrypt.hash(password, 12) })
   resetStore.delete(token)
+  invalidateCache(`user:${reset.userId}`)
   res.json({ message: 'Password updated. You can sign in now.' })
 })
 
-app.post('/api/auth/verify-otp', async (req, res) => {
+app.post('/api/auth/verify-otp', otpLimiter, async (req, res) => {
   try {
     const { email, code, password, name, mobile, college, year, branch, course } = req.body || {}
     const normalizedEmail = email?.trim().toLowerCase()
@@ -1567,6 +1636,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       console.warn('[Activity log warning]:', actErr.message)
     }
     await registrationBatch.commit()
+    invalidateCache('admin:users')
     const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, jwtSecret)
     res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile, college: user.college, year: user.year, branch: user.branch, course: user.course, role: user.role, permissions: user.permissions || {}, blocked: false } })
   } catch (err) {
@@ -1575,7 +1645,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   }
 })
 
-app.patch('/api/me', authRequired, async (req, res) => {
+app.patch('/api/me', authRequired, dbWriteLimiter, async (req, res) => {
   const { name, mobile, college, year, branch, course } = req.body
   if (![name, mobile, college, year, branch, course].every((value) => typeof value === 'string' && value.trim())) {
     return res.status(400).json({ message: 'Name, mobile number, college, year, branch, and course are required.' })
@@ -1584,6 +1654,7 @@ app.patch('/api/me', authRequired, async (req, res) => {
   if (!isValidMobile(profile.mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
   if (profile.course.length > 120) return res.status(400).json({ message: 'Course must be 120 characters or fewer.' })
   await db.collection('users').doc(req.user.id).update(profile)
+  invalidateCache(`user:${req.user.id}`, 'admin:users')
   res.json({ id: req.user.id, email: req.user.email, ...profile, role: req.user.role })
 })
 

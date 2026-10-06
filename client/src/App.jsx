@@ -125,22 +125,31 @@ function App() {
         }
       })
     }
+    let lastRefreshTime = Date.now()
+    const doThrottledRefresh = () => {
+      const now = Date.now()
+      if (now - lastRefreshTime < 45000) return
+      lastRefreshTime = now
+      refreshNotes()
+      refreshNoticeBoard()
+      refreshAdminRoleRequests()
+    }
     refreshNotes()
     refreshNoticeBoard()
     refreshAdminRoleRequests()
     const refreshTimer = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return
+      lastRefreshTime = Date.now()
       refreshNotes()
       refreshNoticeBoard()
       refreshAdminRoleRequests()
-    }, 45000)
-    document.addEventListener('visibilitychange', () => {
+    }, 60000)
+    const onVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        refreshNotes()
-        refreshNoticeBoard()
-        refreshAdminRoleRequests()
+        doThrottledRefresh()
       }
-    })
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
     getFolders(session.token).then((nextFolders) => {
       if (active) {
         setFolders(nextFolders)
@@ -154,7 +163,7 @@ function App() {
       setCanApproveAdminRequests(false)
     }
     if (canManageContent) getAdminNotes(session.token).then(setAdminNotes).catch(() => setAdminNotes([]))
-    return () => { active = false; window.clearInterval(refreshTimer); document.removeEventListener('visibilitychange', refreshNotes) }
+    return () => { active = false; window.clearInterval(refreshTimer); document.removeEventListener('visibilitychange', onVisibilityChange) }
   }, [session, isAdmin, canManageContent, connectionAttempt])
 
   const navigate = (nextView) => {
