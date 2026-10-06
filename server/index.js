@@ -384,14 +384,16 @@ const createRateLimiter = ({
   windowMs = 60 * 1000, 
   max = 120, 
   message = 'Too many requests. Please slow down and try again later.',
-  keyPrefix = 'general'
+  keyPrefix = 'general',
+  keyGenerator = null
 }) => {
   return (req, res, next) => {
     // Health checks do not consume rate limit quotas
     if (req.path === '/api/health') return next()
 
     const ip = getClientIp(req)
-    const key = `${keyPrefix}:${ip}`
+    const dynamicKey = keyGenerator ? keyGenerator(req) : ip
+    const key = `${keyPrefix}:${dynamicKey}`
     const now = Date.now()
     let record = rateLimitStore.get(key)
 
@@ -447,20 +449,40 @@ const heavyAdminLimiter = createRateLimiter({
   keyPrefix: 'admin_heavy'
 })
 
-// 4. Authentication Limiter (12 attempts per 15 min per IP)
+// 4. Authentication Limiter (15 attempts per 15 min per account/IP)
 const authLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
-  max: 12,
+  max: 15,
   message: 'Too many sign-in attempts. Please wait 15 minutes before trying again.',
-  keyPrefix: 'auth_signin'
+  keyPrefix: 'auth_signin',
+  keyGenerator: (req) => {
+    const email = req.body?.email?.trim().toLowerCase()
+    return email ? `${email}:${getClientIp(req)}` : getClientIp(req)
+  }
 })
 
-// 5. Verification OTP Limiter (3 requests per 5 min per IP)
-const otpLimiter = createRateLimiter({
-  windowMs: 5 * 60 * 1000,
-  max: 3,
-  message: 'Too many verification code requests. Please wait 5 minutes before requesting another code.',
-  keyPrefix: 'auth_otp'
+// 5. Verification OTP Dispatch Limiter (6 requests per 10 min per email/IP)
+const otpRequestLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 6,
+  message: 'Too many verification code requests for this email. Please check your inbox or wait 10 minutes.',
+  keyPrefix: 'otp_send',
+  keyGenerator: (req) => {
+    const email = req.body?.email?.trim().toLowerCase()
+    return email ? `${email}:${getClientIp(req)}` : getClientIp(req)
+  }
+})
+
+// 6. Verification OTP Submission & Signup Limiter (15 attempts per 10 min per email/IP)
+const otpVerifyLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 15,
+  message: 'Too many verification code attempts. Please wait 10 minutes before trying again.',
+  keyPrefix: 'otp_verify',
+  keyGenerator: (req) => {
+    const email = req.body?.email?.trim().toLowerCase()
+    return email ? `${email}:${getClientIp(req)}` : getClientIp(req)
+  }
 })
 
 // --- ROBUST, MULTI-ORIGIN & THREAT-PROTECTED CORS CONFIGURATION ---
@@ -1437,7 +1459,7 @@ app.delete('/api/admin/collections/:name', authRequired, adminRequired, dbWriteL
   } catch (err) { res.status(500).json({ message: err.message }) }
 })
 
-app.post('/api/auth/request-otp', otpLimiter, async (req, res) => {
+app.post('/api/auth/request-otp', otpRequestLimiter, async (req, res) => {
   try {
     const { email, purpose = 'signup' } = req.body || {}
     const normalizedEmail = email?.trim().toLowerCase()
@@ -1609,7 +1631,7 @@ app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
   res.json({ message: 'Password updated. You can sign in now.' })
 })
 
-app.post('/api/auth/verify-otp', otpLimiter, async (req, res) => {
+app.post('/api/auth/verify-otp', otpVerifyLimiter, async (req, res) => {
   try {
     const { email, code, password, name, mobile, college, year, branch, course } = req.body || {}
     const normalizedEmail = email?.trim().toLowerCase()
