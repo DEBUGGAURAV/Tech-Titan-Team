@@ -254,7 +254,7 @@ export default function Sidebar({
               boxShadow: '0 0 20px rgba(0, 242, 254, 0.3)'
             }}
           >
-            Sign in to Portal <ArrowUpRight size={18} />
+            Sign In <ArrowUpRight size={18} />
           </button>
         )}
       </div>
