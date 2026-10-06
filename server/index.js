@@ -1,6 +1,12 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
+import path from 'path'
+import { fileURLToPath } from 'url'
+const __serverDir = path.dirname(fileURLToPath(import.meta.url))
+dotenv.config({ path: path.join(__serverDir, '.env') })
+dotenv.config()
 import express from 'express'
-import cors from 'cors'
+import cors from 'cors';
+import compression from 'compression';
 import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
@@ -10,6 +16,7 @@ import { getFirestore, FieldValue } from 'firebase-admin/firestore'
 import * as XLSX from 'xlsx'
 
 const app = express()
+app.use(compression())
 const port = process.env.PORT || 5000
 const jwtSecret = process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' || process.env.RENDER ? '' : 'development-secret')
 if (!jwtSecret) throw new Error('JWT_SECRET must be configured in production.')
@@ -29,7 +36,7 @@ const firebaseApp = getApps().length ? getApps()[0] : initializeApp({
 const db = getFirestore(firebaseApp)
 const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean))
 const noticeBoardCollection = () => db.collection('noticeBoard')
-const noticeExpiryMs = 15 * 24 * 60 * 60 * 1000
+const noticeExpiryMs = 5 * 24 * 60 * 60 * 1000 // 5 days automatic expiration
 const studentYears = ['1st year', '2nd year', '3rd year', '4th year']
 const normalizeMobile = (value) => typeof value === 'string' ? value.trim() : ''
 const isProtectedAdminEmail = (email) => {
@@ -86,12 +93,31 @@ const createNoticeRecord = async ({ title, message, type = 'general' }) => {
   return { id: created.id, ...payload, expiresAt: payload.expiresAt, createdAt: new Date().toISOString() }
 }
 const pruneExpiredNotices = async () => {
-  const expiredSnapshot = await noticeBoardCollection().where('expiresAt', '<=', Date.now()).get()
-  if (expiredSnapshot.empty) return 0
+  const now = Date.now()
+  const fiveDaysAgo = now - noticeExpiryMs
+  const expiredSnapshot = await noticeBoardCollection().where('expiresAt', '<=', now).get()
   const batch = db.batch()
-  expiredSnapshot.docs.forEach((snapshot) => batch.delete(snapshot.ref))
+  const deletedRefs = new Set()
+  expiredSnapshot.docs.forEach((snapshot) => {
+    batch.delete(snapshot.ref)
+    deletedRefs.add(snapshot.id)
+  })
+  
+  const allNotices = await noticeBoardCollection().get()
+  allNotices.docs.forEach((doc) => {
+    const data = doc.data()
+    const exp = typeof data.expiresAt === 'number' ? data.expiresAt : 0
+    const createdTime = data.createdAt?.toMillis ? data.createdAt.toMillis() : 0
+    if ((exp && exp <= now) || (createdTime && createdTime <= fiveDaysAgo)) {
+      if (!deletedRefs.has(doc.id)) {
+        batch.delete(doc.ref)
+        deletedRefs.add(doc.id)
+      }
+    }
+  })
+  
   await batch.commit()
-  return expiredSnapshot.size
+  return deletedRefs.size
 }
 const canManageNoticeBoard = (user) => Boolean(user) && (user.role === 'admin' || user.role === 'content_admin' || hasAnyNotePermission(user))
 const createActivityRecord = (event, req, details = {}) => ({
@@ -131,6 +157,7 @@ app.use(cors({
     return callback(new Error('Origin is not allowed by CORS.'))
   },
 }))
+app.use(compression());
 app.use(express.json())
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'tech-titan-team' }))
@@ -169,7 +196,7 @@ app.post('/api/notes/:id/access', authRequired, async (req, res) => {
   const noteSnapshot = await db.collection('notes').doc(req.params.id).get()
   if (!noteSnapshot.exists || noteSnapshot.data().status !== 'approved') return res.status(404).json({ message: 'Note not found.' })
   const note = noteSnapshot.data()
-  await recordUserActivity(req.user.id, req, 'note_access', { noteId: noteSnapshot.id, noteTitle: note.title || '', subject: note.subject || '' })
+  await recordUserActivity(req.user.id, req, 'note_download', { noteId: noteSnapshot.id, noteTitle: note.title || '', subject: note.subject || '' })
   res.json({ recorded: true })
 })
 app.post('/api/notes', authRequired, async (req, res) => {
@@ -279,6 +306,29 @@ app.delete('/api/notices/:id', authRequired, async (req, res) => {
   await noticeRef.delete()
   res.json({ id: noticeSnapshot.id, deleted: true })
 })
+app.patch('/api/notices/:id', authRequired, async (req, res) => {
+  if (!canManageNoticeBoard(req.user)) return res.status(403).json({ message: 'Notice board management access required.' })
+  const noticeRef = noticeBoardCollection().doc(req.params.id)
+  const noticeSnapshot = await noticeRef.get()
+  if (!noticeSnapshot.exists) return res.status(404).json({ message: 'Notice not found.' })
+  const { title, message, type } = req.body || {}
+  const updates = { updatedAt: FieldValue.serverTimestamp() }
+  if (typeof title === 'string' && title.trim()) updates.title = title.trim()
+  if (typeof message === 'string' && message.trim()) updates.message = message.trim()
+  if (typeof type === 'string' && (type === 'general' || type === 'alert')) updates.type = type
+  await noticeRef.update(updates)
+  const updatedSnapshot = await noticeRef.get()
+  const data = updatedSnapshot.data()
+  res.json({
+    id: updatedSnapshot.id,
+    title: data.title,
+    message: data.message,
+    type: data.type || 'general',
+    createdAt: toIso(data.createdAt),
+    updatedAt: toIso(data.updatedAt),
+    expiresAt: typeof data.expiresAt === 'number' ? data.expiresAt : Date.now() + noticeExpiryMs
+  })
+})
 app.post('/api/folders', authRequired, adminRequired, async (req, res) => {
   const { subject, year } = req.body
   if (!subject || !year) return res.status(400).json({ message: 'Subject and year are required.' })
@@ -343,12 +393,39 @@ app.get('/api/admin/users/:id', authRequired, adminRequired, async (req, res, ne
   })
   res.json({ user: serializeUser(userSnapshot), activity })
 })
+
+// Delete single activity log for a specific user/student
+app.delete('/api/admin/users/:userId/activity/:logId', authRequired, adminRequired, async (req, res) => {
+  const { userId, logId } = req.params
+  const logRef = userActivityCollection(userId).doc(logId)
+  const logSnapshot = await logRef.get()
+  if (!logSnapshot.exists) return res.status(404).json({ message: 'Activity log not found.' })
+  await logRef.delete()
+  res.json({ id: logId, userId, deleted: true })
+})
+
+// Delete all activity logs for a specific user/student
+app.delete('/api/admin/users/:userId/activity', authRequired, adminRequired, async (req, res) => {
+  const { userId } = req.params
+  const activitySnapshot = await userActivityCollection(userId).get()
+  const batch = db.batch()
+  activitySnapshot.docs.forEach((doc) => batch.delete(doc.ref))
+  await batch.commit()
+  res.json({ userId, deletedCount: activitySnapshot.size, deleted: true })
+})
+
 app.patch('/api/admin/users/:id', authRequired, adminRequired, async (req, res) => {
-  const { name, mobile, college, year, branch, course } = req.body || {}
+  const { name, email, mobile, college, year, branch, course, role } = req.body || {}
   if (![name, mobile, college, year, branch, course].every((value) => typeof value === 'string' && value.trim())) {
     return res.status(400).json({ message: 'Name, mobile number, college, year, branch, and course are required.' })
   }
   const profile = { name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: year.trim(), branch: branch.trim(), course: course.trim() }
+  if (typeof email === 'string' && email.trim() && emailPattern.test(email.trim())) {
+    profile.email = email.trim().toLowerCase()
+  }
+  if (typeof role === 'string' && ['student', 'content_admin', 'admin'].includes(role.trim())) {
+    profile.role = role.trim()
+  }
   if (!isValidMobile(profile.mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
   if (profile.name.length > 120 || profile.mobile.length > 20 || profile.college.length > 200 || profile.year.length > 80 || profile.branch.length > 120 || profile.course.length > 120) {
     return res.status(400).json({ message: 'One or more profile fields are too long.' })
@@ -654,86 +731,246 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
   res.set('Cache-Control', 'no-store').header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').attachment('tech-titan-team-students.xlsx').send(output)
 })
 
-app.post('/api/auth/request-otp', async (req, res) => {
-  const { email, purpose = 'signup' } = req.body
-  const normalizedEmail = email?.trim().toLowerCase()
-  if (purpose !== 'signup') return res.status(400).json({ message: 'Email codes are only available for signup.' })
-  if (!normalizedEmail) return res.status(400).json({ message: 'Email is required' })
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Enter a valid email address.' })
-  const code = String(crypto.randomInt(100000, 1000000))
-  otpStore.set(normalizedEmail, { code, purpose, expires: Date.now() + 10 * 60 * 1000 })
-  if (mailjet && process.env.MAILJET_SENDER_EMAIL) {
-    await mailjet.post('send', { version: 'v3.1' }).request({
-      Messages: [{
-        From: { Email: process.env.MAILJET_SENDER_EMAIL, Name: 'Tech Titan Team' },
-        To: [{ Email: normalizedEmail }],
-        Subject: 'Your verification code',
-        TextPart: `Hello,\n\nYour verification code is: ${code}\n\nThis code will expire in 10 minutes.\n\nIf you did not request this code, you can ignore this email.\n\nRegards,\nTech Titan Team`,
-        HTMLPart: `
-          <!DOCTYPE html>
-          <html lang="en">
-            <head>
-              <meta charset="UTF-8" />
-              <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-              <title>Verification Code</title>
-            </head>
-            <body style="margin:0; padding:0; background-color:#f4f7fb; font-family:Arial, Helvetica, sans-serif;">
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f7fb; padding:30px 0;">
-                <tr>
-                  <td align="center">
-                    <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 4px 16px rgba(0,0,0,0.06);">
-                      <tr>
-                        <td style="background:linear-gradient(135deg, #0f172a, #1d4ed8); padding:28px 30px; text-align:center;">
-                          <h1 style="margin:0; color:#ffffff; font-size:28px; font-weight:bold;">Tech Titan</h1>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td style="padding:40px 30px 20px 30px; color:#1f2937; font-size:16px; line-height:1.8;">
-                          <p style="margin:0 0 20px 0;">Hello,</p>
+app.get('/api/admin/collections', authRequired, adminRequired, async (req, res) => {
+  try {
+    const collections = await db.listCollections()
+    const result = await Promise.all(collections.map(async (col) => {
+      const snapshot = await col.get()
+      return { name: col.id, count: snapshot.size }
+    }))
+    if (!result.some(c => c.name === 'deletedData')) {
+      const trashSnap = await db.collection('deletedData').get()
+      result.unshift({ name: 'deletedData', count: trashSnap.size })
+    }
+    res.json(result)
+  } catch (err) { res.status(500).json({ message: err.message }) }
+})
 
-                          <p style="margin:0 0 20px 0;">
-                            Your verification code is:
-                          </p>
+app.get('/api/admin/collections/:name', authRequired, adminRequired, async (req, res) => {
+  try {
+    const snapshot = await db.collection(req.params.name).limit(100).get()
+    res.json(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })))
+  } catch (err) { res.status(500).json({ message: err.message }) }
+})
 
-                          <p style="margin:0 0 25px 0; text-align:center;">
-                            <span style="display:inline-block; background:#eef2ff; color:#1e3a8a; font-size:32px; font-weight:bold; letter-spacing:6px; padding:18px 24px; border-radius:10px; border:1px solid #c7d2fe;">
-                              ${code}
-                            </span>
-                          </p>
+app.post('/api/admin/collections/deletedData/:id/restore', authRequired, adminRequired, async (req, res) => {
+  try {
+    const trashRef = db.collection('deletedData').doc(req.params.id)
+    const trashSnap = await trashRef.get()
+    if (!trashSnap.exists) return res.status(404).json({ message: 'Deleted record not found' })
+    const trashData = trashSnap.data()
+    
+    // Restore to original
+    await db.collection(trashData.originalCollection).doc(trashData.originalId).set(trashData.data)
+    
+    // Remove from trash
+    await trashRef.delete()
+    
+    res.json({ success: true })
+  } catch (err) { res.status(500).json({ message: err.message }) }
+})
 
-                          <p style="margin:0 0 20px 0;">
-                            This code will expire in 10 minutes.
-                          </p>
+app.post('/api/admin/collections/restore/:id', authRequired, adminRequired, async (req, res) => {
+  try {
+    const trashRef = db.collection('deletedData').doc(req.params.id)
+    const trashSnap = await trashRef.get()
+    if (!trashSnap.exists) return res.status(404).json({ message: 'Document not found in trash.' })
+    
+    const docData = trashSnap.data()
+    if (docData.originalCollection && docData.originalId) {
+      await db.collection(docData.originalCollection).doc(docData.originalId).set(docData.data || {})
+    }
+    await trashRef.delete()
+    res.json({ success: true })
+  } catch (err) { res.status(500).json({ message: err.message }) }
+})
 
-                          <p style="margin:0;">
-                            If you did not request this code, you can ignore this email.
-                          </p>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td style="padding:20px 30px 30px 30px; text-align:center; color:#6b7280; font-size:14px;">
-                          Regards,<br />
-                          <strong>Tech Titan Team</strong>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-            </body>
-          </html>
-        `,
-      }],
+app.post('/api/admin/collections/restore-all', authRequired, adminRequired, async (req, res) => {
+  try {
+    const snapshot = await db.collection('deletedData').get()
+    const batch = db.batch()
+    snapshot.docs.forEach((doc) => {
+      const docData = doc.data()
+      if (docData.originalCollection && docData.originalId) {
+        const originalRef = db.collection(docData.originalCollection).doc(docData.originalId)
+        batch.set(originalRef, docData.data || {})
+      }
+      batch.delete(doc.ref)
     })
-  } else {
-    console.log(`Development OTP for ${normalizedEmail}: ${code}`)
+    await batch.commit()
+    res.json({ success: true, count: snapshot.size })
+  } catch (err) { res.status(500).json({ message: err.message }) }
+})
+
+app.post('/api/admin/collections/restore-category/:category', authRequired, adminRequired, async (req, res) => {
+  try {
+    const snapshot = await db.collection('deletedData').where('originalCollection', '==', req.params.category).get()
+    const batch = db.batch()
+    snapshot.docs.forEach((doc) => {
+      const docData = doc.data()
+      if (docData.originalCollection && docData.originalId) {
+        const originalRef = db.collection(docData.originalCollection).doc(docData.originalId)
+        batch.set(originalRef, docData.data || {})
+      }
+      batch.delete(doc.ref)
+    })
+    await batch.commit()
+    res.json({ success: true, count: snapshot.size })
+  } catch (err) { res.status(500).json({ message: err.message }) }
+})
+
+app.delete('/api/admin/collections/:name/:id', authRequired, adminRequired, async (req, res) => {
+  try {
+    if (req.params.name === 'deletedData') {
+      await db.collection(req.params.name).doc(req.params.id).delete()
+    } else {
+      const docRef = db.collection(req.params.name).doc(req.params.id)
+      const docSnap = await docRef.get()
+      if (docSnap.exists) {
+        await db.collection('deletedData').doc(req.params.name + '_' + req.params.id).set({
+          originalCollection: req.params.name,
+          originalId: req.params.id,
+          data: docSnap.data(),
+          deletedAt: FieldValue.serverTimestamp(),
+          expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+        })
+      }
+      await docRef.delete()
+    }
+    res.json({ success: true })
+  } catch (err) { res.status(500).json({ message: err.message }) }
+})
+
+app.delete('/api/admin/collections/:name', authRequired, adminRequired, async (req, res) => {
+  try {
+    const snapshot = await db.collection(req.params.name).get()
+    if (req.params.name === 'deletedData') {
+      const batch = db.batch()
+      snapshot.docs.forEach((doc) => batch.delete(doc.ref))
+      await batch.commit()
+      return res.json({ success: true, count: snapshot.size })
+    }
+    
+    const batch = db.batch()
+    const expireAt = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+    snapshot.docs.forEach((doc) => {
+      const trashRef = db.collection('deletedData').doc(req.params.name + '_' + doc.id)
+      batch.set(trashRef, {
+        originalCollection: req.params.name,
+        originalId: doc.id,
+        data: doc.data(),
+        deletedAt: FieldValue.serverTimestamp(),
+        expireAt: expireAt
+      })
+      batch.delete(doc.ref)
+    })
+    await batch.commit()
+    res.json({ success: true, count: snapshot.size })
+  } catch (err) { res.status(500).json({ message: err.message }) }
+})
+
+app.post('/api/auth/request-otp', async (req, res) => {
+  try {
+    const { email, purpose = 'signup' } = req.body || {}
+    const normalizedEmail = email?.trim().toLowerCase()
+    if (purpose !== 'signup') return res.status(400).json({ message: 'Email codes are only available for signup.' })
+    if (!normalizedEmail) return res.status(400).json({ message: 'Email is required' })
+    if (!normalizedEmail.includes('@gmail.com')) return res.status(400).json({ message: 'Enter the email that contain @gmail.com' })
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Enter a valid email address.' })
+    const code = String(crypto.randomInt(100000, 1000000))
+    otpStore.set(normalizedEmail, { code, purpose, expires: Date.now() + 10 * 60 * 1000 })
+    
+    if (mailjet && process.env.MAILJET_SENDER_EMAIL) {
+      try {
+        await mailjet.post('send', { version: 'v3.1' }).request({
+          Messages: [{
+            From: { Email: process.env.MAILJET_SENDER_EMAIL, Name: 'Tech Titan Team' },
+            To: [{ Email: normalizedEmail }],
+            Subject: '⚡ Tech Titan Team // Your Secret Access Key is ' + code,
+            TextPart: `⚡ TECH TITAN TEAM — OFFICIAL VERIFICATION CODE\n\nWelcome to Tech Titan Team.\n\nYour 6-Digit Secure Passcode is:\n===================================\n          >>> ${code} <<<\n===================================\n\n🔒 This passcode expires in exactly 10 minutes.\nFor your security, never share this code with anyone.\n\nForge ahead,\nTech Titan Team`,
+            HTMLPart: `
+              <!DOCTYPE html>
+              <html lang="en">
+                <head>
+                  <meta charset="UTF-8" />
+                  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+                  <title>Tech Titan Team Verification</title>
+                </head>
+                <body style="margin:0; padding:0; background-color:#080c16; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#cbd5e1;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#080c16; padding:40px 15px;">
+                    <tr>
+                      <td align="center">
+                        <table role="presentation" width="100%" style="max-width:580px; background:linear-gradient(145deg, #0f172a 0%, #090f1f 100%); border-radius:20px; overflow:hidden; border:1.5px solid #00f2fe; box-shadow:0 20px 60px rgba(0,0,0,0.8), 0 0 35px rgba(0,242,254,0.25);">
+                          <tr>
+                            <td style="height:4px; background:linear-gradient(90deg, #00f2fe 0%, #38bdf8 50%, #c084fc 100%);"></td>
+                          </tr>
+                          <tr>
+                            <td style="padding:36px 32px 20px; text-align:center;">
+                              <div style="display:inline-block; padding:4px 14px; border-radius:30px; background:rgba(0,242,254,0.12); border:1px solid rgba(0,242,254,0.35); color:#00f2fe; font-size:12px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:16px;">
+                                ⚡ TECH TITAN TEAM // SECURITY SYSTEM
+                              </div>
+                              <h1 style="margin:0; color:#f8fafc; font-size:28px; font-weight:900; letter-spacing:-0.5px;">
+                                Welcome to Tech Titan Team
+                              </h1>
+                              <p style="margin:10px 0 0; color:#94a3b8; font-size:15px; line-height:1.5;">
+                                Your single-use access cipher has been synthesized. Use this code to verify your student account.
+                              </p>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td style="padding:10px 32px 30px; text-align:center;">
+                              <div style="background:rgba(0,0,0,0.5); border:1.5px solid rgba(0,242,254,0.5); border-radius:14px; padding:24px 20px; margin:10px 0 24px; box-shadow:inset 0 0 25px rgba(0,242,254,0.15);">
+                                <span style="display:block; font-size:12px; font-weight:700; color:#38bdf8; letter-spacing:1px; text-transform:uppercase; margin-bottom:8px;">One-Time Verification Cipher</span>
+                                <span style="font-family:'Courier New', Courier, monospace; font-size:42px; font-weight:900; letter-spacing:12px; color:#00f2fe; text-shadow:0 0 15px rgba(0,242,254,0.6); display:inline-block; padding-left:12px;">${code}</span>
+                              </div>
+                              <div style="display:inline-block; color:#fbbf24; font-size:13px; font-weight:700;">
+                                ⏳ Temporal validity: 10 minutes only.
+                              </div>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td style="padding:24px 32px; background:rgba(0,0,0,0.35); border-top:1px solid rgba(255,255,255,0.06); text-align:center;">
+                              <p style="margin:0 0 10px; color:#64748b; font-size:12px; line-height:1.5;">
+                                If you did not initiate this request, disregard this transmission. Never disclose this cipher to anyone.
+                              </p>
+                              <div style="margin-top:14px; color:#38bdf8; font-size:13px; font-weight:800;">
+                                — Tech Titan Team Collective
+                              </div>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+                  </table>
+                </body>
+              </html>
+            `,
+          }],
+        })
+        console.log(`[Mailjet] Sent OTP to ${normalizedEmail}`)
+      } catch (mailErr) {
+        console.error(`[Mailjet Warning] Failed to send email to ${normalizedEmail}:`, mailErr.message)
+      }
+    } else {
+      console.log(`[Development OTP] Code for ${normalizedEmail}: ${code}`)
+    }
+    console.log(`[Signup OTP for ${normalizedEmail}]: ${code}`)
+    res.json({ message: 'Verification code sent' })
+  } catch (err) {
+    console.error('[Request OTP Error]:', err)
+    res.status(500).json({ message: err.message || 'Error sending verification code.' })
   }
-  res.json({ message: 'Verification code sent' })
 })
 
 app.post('/api/auth/signin', async (req, res) => {
-  const { email, password } = req.body
-  const normalizedEmail = email?.toLowerCase().trim()
+  const { email, password } = req.body || {}
+  if (!email || !email.trim() || !password || !password.trim()) {
+    return res.status(400).json({ message: 'All fields are mandatory. Please enter both email and password.' })
+  }
+  const normalizedEmail = email.toLowerCase().trim()
+  if (!normalizedEmail.includes('@gmail.com')) {
+    return res.status(400).json({ message: 'Enter the email that contain @gmail.com' })
+  }
   const userRef = db.collection('users').doc(Buffer.from(normalizedEmail || '').toString('base64url'))
   const snapshot = await userRef.get()
   if (!snapshot.exists) {
@@ -785,7 +1022,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     resetStore.set(resetToken, { userId: userRef.id, expires: Date.now() + 15 * 60 * 1000 })
     const resetUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/?reset=${resetToken}`
     if (mailjet && process.env.MAILJET_SENDER_EMAIL) {
-      await mailjet.post('send', { version: 'v3.1' }).request({ Messages: [{ From: { Email: process.env.MAILJET_SENDER_EMAIL, Name: 'Tech Titan Team' }, To: [{ Email: normalizedEmail }], Subject: 'Reset your Tech Titan Team password', TextPart: `Reset your password: ${resetUrl}`, HTMLPart: `<p>Reset your password within 15 minutes:</p><p><a href="${resetUrl}">${resetUrl}</a></p>` }] })
+      await mailjet.post('send', { version: 'v3.1' }).request({ Messages: [{ From: { Email: process.env.MAILJET_SENDER_EMAIL, Name: 'Tech Titan Team' }, To: [{ Email: normalizedEmail }], Subject: '⚡ Tech Titan Team // Password Reset Request', TextPart: `Reset your password: ${resetUrl}`, HTMLPart: `<p>Reset your password within 15 minutes:</p><p><a href="${resetUrl}">${resetUrl}</a></p>` }] })
     } else {
       console.log(`Password reset link for ${normalizedEmail}: ${resetUrl}`)
     }
@@ -803,28 +1040,38 @@ app.post('/api/auth/reset-password', async (req, res) => {
 })
 
 app.post('/api/auth/verify-otp', async (req, res) => {
-  const { email, code, password, name, mobile, college, year, branch, course } = req.body
-  const normalizedEmail = email?.trim().toLowerCase()
-  if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Enter a valid email address.' })
-  if (![name, mobile, college, year, branch, course].every((value) => typeof value === 'string' && value.trim())) return res.status(400).json({ message: 'Name, mobile number, college, year, branch, and course are required.' })
-  if (!studentYears.includes(year.trim())) return res.status(400).json({ message: 'Choose a year from 1st year to 4th year.' })
-  if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
-  if (course.trim().length > 120) return res.status(400).json({ message: 'Course must be 120 characters or fewer.' })
-  if (!password || password.length < 8) return res.status(400).json({ message: 'A password of at least 8 characters is required.' })
-  const record = otpStore.get(normalizedEmail)
-  if (!record || record.purpose !== 'signup' || record.expires < Date.now() || record.code !== code) return res.status(401).json({ message: 'Invalid or expired code' })
-  otpStore.delete(normalizedEmail)
-  const userRef = db.collection('users').doc(Buffer.from(normalizedEmail).toString('base64url'))
-  const existing = await userRef.get()
-  if (existing.exists) return res.status(409).json({ message: 'An account already exists for this email. Sign in instead.' })
-  const user = { email: normalizedEmail, name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: year.trim(), branch: branch.trim(), course: course.trim(), passwordHash: await bcrypt.hash(password, 12), role: adminEmails.has(normalizedEmail) ? 'admin' : 'student', blocked: false, createdAt: FieldValue.serverTimestamp() }
-  const registrationBatch = db.batch()
-  registrationBatch.set(userRef, user)
-  registrationBatch.set(userActivityCollection(userRef.id).doc(), createActivityRecord('registered', req, { year: user.year, course: user.course }))
-  await registrationBatch.commit()
-  const responseUser = { id: userRef.id, ...user, createdAt: undefined }
-  const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, jwtSecret)
-  res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile, college: user.college, year: user.year, branch: user.branch, course: user.course, role: user.role, permissions: user.permissions || {}, blocked: false } })
+  try {
+    const { email, code, password, name, mobile, college, year, branch, course } = req.body || {}
+    const normalizedEmail = email?.trim().toLowerCase()
+    if (!normalizedEmail || !normalizedEmail.includes('@gmail.com')) return res.status(400).json({ message: 'Enter the email that contain @gmail.com' })
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(normalizedEmail)) return res.status(400).json({ message: 'Enter a valid email address.' })
+    if (![name, mobile, college, year, branch, course].every((value) => typeof value === 'string' && value.trim())) return res.status(400).json({ message: 'Name, mobile number, college, year, branch, and course are required.' })
+    if (!studentYears.includes(year.trim())) return res.status(400).json({ message: 'Choose a year from 1st year to 4th year.' })
+    if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Enter a valid mobile number with 7 to 15 digits.' })
+    if (course.trim().length > 120) return res.status(400).json({ message: 'Course must be 120 characters or fewer.' })
+    if (!password || password.length < 8) return res.status(400).json({ message: 'A password of at least 8 characters is required.' })
+    const record = otpStore.get(normalizedEmail)
+    const normalizedCode = String(code || '').trim()
+    if (!record || record.purpose !== 'signup' || record.expires < Date.now() || record.code !== normalizedCode) return res.status(401).json({ message: 'Invalid or expired code' })
+    otpStore.delete(normalizedEmail)
+    const userRef = db.collection('users').doc(Buffer.from(normalizedEmail).toString('base64url'))
+    const existing = await userRef.get()
+    if (existing.exists) return res.status(409).json({ message: 'An account already exists for this email. Sign in instead.' })
+    const user = { email: normalizedEmail, name: name.trim(), mobile: normalizeMobile(mobile), college: college.trim(), year: year.trim(), branch: branch.trim(), course: course.trim(), passwordHash: await bcrypt.hash(password, 12), role: adminEmails.has(normalizedEmail) ? 'admin' : 'student', blocked: false, createdAt: FieldValue.serverTimestamp() }
+    const registrationBatch = db.batch()
+    registrationBatch.set(userRef, user)
+    try {
+      registrationBatch.set(userActivityCollection(userRef.id).doc(), createActivityRecord('registered', req, { year: user.year, course: user.course }))
+    } catch (actErr) {
+      console.warn('[Activity log warning]:', actErr.message)
+    }
+    await registrationBatch.commit()
+    const token = jwt.sign({ userId: userRef.id, email: normalizedEmail }, jwtSecret)
+    res.json({ token, user: { id: userRef.id, email: user.email, name: user.name, mobile: user.mobile, college: user.college, year: user.year, branch: user.branch, course: user.course, role: user.role, permissions: user.permissions || {}, blocked: false } })
+  } catch (err) {
+    console.error('[Verify OTP Error]:', err)
+    res.status(500).json({ message: err.message || 'Error completing account registration.' })
+  }
 })
 
 app.patch('/api/me', authRequired, async (req, res) => {
@@ -848,7 +1095,7 @@ const ensureAdmin = async () => {
     await userRef.set({ email, role: 'admin', blocked: false, mobile: '' }, { merge: true })
   } else {
     const passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12)
-    await userRef.set({ email, name: process.env.ADMIN_NAME || 'Tech Titan Admin', mobile: '', passwordHash, role: 'admin', blocked: false, college: '', year: '', branch: '', createdAt: FieldValue.serverTimestamp() })
+    await userRef.set({ email, name: process.env.ADMIN_NAME || 'Nexus Core Admin', mobile: '', passwordHash, role: 'admin', blocked: false, college: '', year: '', branch: '', createdAt: FieldValue.serverTimestamp() })
   }
   console.log(`Admin account ready for ${email}`)
 }
@@ -859,7 +1106,7 @@ const startServer = async () => {
   setInterval(() => {
     pruneExpiredNotices().catch(() => {})
   }, 60 * 60 * 1000)
-  app.listen(port, () => console.log(`Tech Titan Team API running on http://localhost:${port}`))
+  app.listen(port, () => console.log(`Nexus Core API running on http://localhost:${port}`))
 }
 
 startServer().catch((error) => { console.error('Server bootstrap failed:', error.message); process.exit(1) })
