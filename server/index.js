@@ -17,6 +17,55 @@ import * as XLSX from 'xlsx'
 
 const app = express()
 app.use(compression())
+
+const isQuotaError = (err) => {
+  if (!err) return false
+  const msg = String(err.message || err.details || err || '')
+  return err.code === 8 ||
+         err.code === 'RESOURCE_EXHAUSTED' ||
+         msg.includes('Quota exceeded') ||
+         msg.includes('RESOURCE_EXHAUSTED')
+}
+
+// --- PROCESS CRASH DEFENSE: PREVENT NODE.JS 24 UNCAUGHT PROMISE TERMINATION ---
+process.on('unhandledRejection', (reason, _promise) => {
+  if (isQuotaError(reason)) {
+    console.warn('[Process Guard] Handled unhandledRejection: Firestore quota limit reached.')
+    return
+  }
+  console.warn('[Process Guard] Handled unhandledRejection:', reason?.message || String(reason || ''))
+})
+
+process.on('uncaughtException', (err) => {
+  if (isQuotaError(err)) {
+    console.warn('[Process Guard] Handled uncaughtException: Firestore quota limit reached.')
+    return
+  }
+  console.error('[Process Guard] Handled uncaughtException:', err?.message || String(err || ''))
+})
+
+// Automatically catch all async route rejections in Express 4 and forward to error middleware
+const expressMethods = ['get', 'post', 'put', 'patch', 'delete']
+for (const method of expressMethods) {
+  const originalMethod = app[method].bind(app)
+  app[method] = (routePath, ...handlers) => {
+    const safeHandlers = handlers.map((handler) => {
+      if (typeof handler !== 'function') return handler
+      return (req, res, next) => {
+        try {
+          const ret = handler(req, res, next)
+          if (ret && typeof ret.catch === 'function') {
+            ret.catch(next)
+          }
+        } catch (syncErr) {
+          next(syncErr)
+        }
+      }
+    })
+    return originalMethod(routePath, ...safeHandlers)
+  }
+}
+
 const port = process.env.PORT || 5000
 const jwtSecret = process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' || process.env.RENDER ? '' : 'development-secret')
 if (!jwtSecret) throw new Error('JWT_SECRET must be configured in production.')
@@ -164,14 +213,6 @@ const invalidateCache = (...keys) => {
   for (const k of keys) {
     serverCache.delete(k)
   }
-}
-
-const isQuotaError = (err) => {
-  if (!err) return false
-  return err.code === 8 ||
-         err.code === 'RESOURCE_EXHAUSTED' ||
-         String(err.details || '').includes('Quota exceeded') ||
-         String(err.message || '').includes('Quota exceeded')
 }
 
 const studentYears = ['1st year', '2nd year', '3rd year', '4th year']
@@ -448,12 +489,39 @@ app.get('/api/health', (_req, res) => {
 
 const authRequired = async (req, res, next) => {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '')
+    const rawHeader = req.headers.authorization || ''
+    const token = rawHeader.replace(/^Bearer\s+/i, '')
+    if (!token) return res.status(401).json({ message: 'Sign in required.' })
     const identity = jwt.verify(token, jwtSecret)
-    const snapshot = await db.collection('users').doc(identity.userId).get()
-    if (!snapshot.exists || snapshot.data().blocked) return res.status(403).json({ message: 'This account is blocked.' })
-    req.user = { id: snapshot.id, ...snapshot.data() }
-    next()
+
+    // Check memory cache first (TTL: 2 minutes)
+    const cachedUser = getFromCache(`user:${identity.userId}`, 120000)
+    if (cachedUser) {
+      if (cachedUser.blocked) return res.status(403).json({ message: 'This account is blocked.' })
+      req.user = cachedUser
+      return next()
+    }
+
+    try {
+      const snapshot = await db.collection('users').doc(identity.userId).get()
+      if (!snapshot.exists || snapshot.data().blocked) return res.status(403).json({ message: 'This account is blocked.' })
+      const userData = { id: snapshot.id, ...snapshot.data() }
+      saveToCache(`user:${identity.userId}`, userData)
+      req.user = userData
+      next()
+    } catch (dbErr) {
+      if (isQuotaError(dbErr)) {
+        console.warn('[Quota Guard] authRequired hit quota. Using cached/token identity fallback.')
+        const fallbackUser = getStaleFallback(`user:${identity.userId}`) || {
+          id: identity.userId,
+          email: identity.email,
+          role: adminEmails.has(identity.email) ? 'admin' : 'student',
+        }
+        req.user = fallbackUser
+        return next()
+      }
+      throw dbErr
+    }
   } catch {
     res.status(401).json({ message: 'Sign in required.' })
   }
@@ -729,19 +797,46 @@ app.delete('/api/folders/:id', authRequired, adminRequired, async (req, res) => 
   res.json({ id: req.params.id, deleted: true, deletedNotes: linkedNotes.length })
 })
 app.get('/api/admin/users', authRequired, adminRequired, async (_req, res) => {
-  const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
-  res.json(snapshot.docs.map(serializeUser))
+  try {
+    const cached = getFromCache('admin:users', 60000)
+    if (cached) return res.json(cached)
+
+    const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get()
+    const users = snapshot.docs.map(serializeUser)
+    saveToCache('admin:users', users)
+    res.json(users)
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] /api/admin/users hit quota limit. Serving fallback users.')
+      const fallback = getStaleFallback('admin:users') || []
+      return res.json(fallback)
+    }
+    res.status(500).json({ message: 'Unable to load users right now.' })
+  }
 })
 app.get('/api/admin/users/:id', authRequired, adminRequired, async (req, res, next) => {
   if (req.params.id === 'export') return next()
-  const userSnapshot = await db.collection('users').doc(req.params.id).get()
-  if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
-  const activitySnapshot = await userActivityCollection(req.params.id).orderBy('eventAt', 'desc').limit(100).get()
-  const activity = activitySnapshot.docs.map((snapshot) => {
-    const event = snapshot.data()
-    return { id: snapshot.id, event: event.event || '', ipAddress: event.ipAddress || '', occurredAt: toIso(event.eventAt), noteId: event.noteId || '', noteTitle: event.noteTitle || '', subject: event.subject || '', year: event.year || '', course: event.course || '' }
-  })
-  res.json({ user: serializeUser(userSnapshot), activity })
+  try {
+    const userSnapshot = await db.collection('users').doc(req.params.id).get()
+    if (!userSnapshot.exists) return res.status(404).json({ message: 'User not found.' })
+    let activity = []
+    try {
+      const activitySnapshot = await userActivityCollection(req.params.id).orderBy('eventAt', 'desc').limit(100).get()
+      activity = activitySnapshot.docs.map((snapshot) => {
+        const event = snapshot.data()
+        return { id: snapshot.id, event: event.event || '', ipAddress: event.ipAddress || '', occurredAt: toIso(event.eventAt), noteId: event.noteId || '', noteTitle: event.noteTitle || '', subject: event.subject || '', year: event.year || '', course: event.course || '' }
+      })
+    } catch (actErr) {
+      console.warn('[Activity fetch notice]:', actErr.message)
+    }
+    res.json({ user: serializeUser(userSnapshot), activity })
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] /api/admin/users/:id hit quota limit.')
+      return res.status(503).json({ message: 'Database quota limit reached. Please try again later.' })
+    }
+    res.status(500).json({ message: 'Unable to load user details.' })
+  }
 })
 
 // Delete single activity log for a specific user/student
@@ -863,9 +958,23 @@ app.patch('/api/admin/users/:id/permissions', authRequired, adminRequired, async
 })
 app.get('/api/admin/admin-requests', authRequired, adminRequired, async (req, res) => {
   if (!isPrimaryAdmin(req.user)) return res.json({ canApprove: false, requests: [] })
-  const snapshot = await adminRoleRequestsCollection().orderBy('requestedAt', 'desc').get()
-  const requests = snapshot.docs.map(serializeAdminRoleRequest).filter((request) => request.status === 'pending')
-  res.json({ canApprove: true, requests })
+  try {
+    const cached = getFromCache('admin:requests', 60000)
+    if (cached) return res.json(cached)
+
+    const snapshot = await adminRoleRequestsCollection().orderBy('requestedAt', 'desc').get()
+    const requests = snapshot.docs.map(serializeAdminRoleRequest).filter((request) => request.status === 'pending')
+    const result = { canApprove: true, requests }
+    saveToCache('admin:requests', result)
+    res.json(result)
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] /api/admin/admin-requests hit quota limit.')
+      const fallback = getStaleFallback('admin:requests') || { canApprove: true, requests: [] }
+      return res.json(fallback)
+    }
+    res.status(500).json({ message: 'Unable to load admin requests right now.' })
+  }
 })
 app.post('/api/admin/admin-requests/:id/decision', authRequired, adminRequired, async (req, res) => {
   if (!isPrimaryAdmin(req.user)) return res.status(403).json({ message: 'Only the main admin can review admin promotion requests.' })
@@ -1083,24 +1192,66 @@ app.get('/api/admin/users/export', authRequired, adminRequired, async (_req, res
 
 app.get('/api/admin/collections', authRequired, adminRequired, async (req, res) => {
   try {
-    const collections = await db.listCollections()
-    const result = await Promise.all(collections.map(async (col) => {
-      const snapshot = await col.get()
-      return { name: col.id, count: snapshot.size }
-    }))
-    if (!result.some(c => c.name === 'deletedData')) {
-      const trashSnap = await db.collection('deletedData').get()
-      result.unshift({ name: 'deletedData', count: trashSnap.size })
+    const cached = getFromCache('admin:collections', 60000)
+    if (cached) return res.json(cached)
+
+    let result = []
+    try {
+      const collections = await db.listCollections()
+      result = await Promise.all(collections.map(async (col) => {
+        try {
+          const snapshot = await col.limit(100).get()
+          return { name: col.id, count: snapshot.size }
+        } catch {
+          return { name: col.id, count: 0 }
+        }
+      }))
+    } catch {
+      result = [
+        { name: 'notes', count: 0 },
+        { name: 'folders', count: 0 },
+        { name: 'users', count: 0 },
+        { name: 'noticeBoard', count: 0 },
+      ]
     }
+
+    if (!result.some(c => c.name === 'deletedData')) {
+      try {
+        const trashSnap = await db.collection('deletedData').limit(100).get()
+        result.unshift({ name: 'deletedData', count: trashSnap.size })
+      } catch {
+        result.unshift({ name: 'deletedData', count: 0 })
+      }
+    }
+    saveToCache('admin:collections', result)
     res.json(result)
-  } catch (err) { res.status(500).json({ message: err.message }) }
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] /api/admin/collections hit quota limit.')
+      const fallback = getStaleFallback('admin:collections') || [
+        { name: 'notes', count: 0 },
+        { name: 'folders', count: 0 },
+        { name: 'users', count: 0 },
+        { name: 'noticeBoard', count: 0 },
+        { name: 'deletedData', count: 0 }
+      ]
+      return res.json(fallback)
+    }
+    res.status(500).json({ message: err.message })
+  }
 })
 
 app.get('/api/admin/collections/:name', authRequired, adminRequired, async (req, res) => {
   try {
     const snapshot = await db.collection(req.params.name).limit(100).get()
     res.json(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })))
-  } catch (err) { res.status(500).json({ message: err.message }) }
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn(`[Quota Guard] /api/admin/collections/${req.params.name} hit quota limit.`)
+      return res.json([])
+    }
+    res.status(500).json({ message: err.message })
+  }
 })
 
 app.post('/api/admin/collections/deletedData/:id/restore', authRequired, adminRequired, async (req, res) => {
