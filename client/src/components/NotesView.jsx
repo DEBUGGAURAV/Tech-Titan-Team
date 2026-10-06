@@ -134,9 +134,10 @@ function NoteCard({ note, onAccess }) {
       padding: '22px 20px 18px',
       position: 'relative',
       overflow: 'hidden',
-      boxShadow: `0 4px 24px rgba(0,0,0,0.4), 0 0 0 0 ${colors.accent}`,
-      transition: 'all 0.22s ease',
+      boxShadow: `0 4px 20px rgba(0,0,0,0.35)`,
+      transition: 'transform 0.2s ease, border-color 0.2s ease',
       cursor: 'default',
+      contain: 'content',
     }}>
       {/* Accent glow blob */}
       <div style={{

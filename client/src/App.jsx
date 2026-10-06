@@ -106,6 +106,7 @@ function App() {
       })
     }
     const refreshNoticeBoard = () => {
+      if (document.visibilityState !== 'visible') return
       getNotices(session.token).then((nextNotices) => {
         if (active) {
           setNoticeBoard(nextNotices)
@@ -116,7 +117,7 @@ function App() {
       })
     }
     const refreshAdminRoleRequests = () => {
-      if (!isAdmin) return
+      if (!isAdmin || document.visibilityState !== 'visible') return
       getAdminRoleRequests(session.token).then((result) => {
         if (!active) return
         setCanApproveAdminRequests(result.canApprove)
@@ -132,11 +133,18 @@ function App() {
     refreshNoticeBoard()
     refreshAdminRoleRequests()
     const refreshTimer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
       refreshNotes()
       refreshNoticeBoard()
       refreshAdminRoleRequests()
-    }, 30000)
-    document.addEventListener('visibilitychange', refreshNotes)
+    }, 45000)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        refreshNotes()
+        refreshNoticeBoard()
+        refreshAdminRoleRequests()
+      }
+    })
     getFolders(session.token).then((nextFolders) => {
       if (active) {
         setFolders(nextFolders)
@@ -374,18 +382,19 @@ function App() {
     if (view === 'profile' || view === 'admin') return;
     const observer = new IntersectionObserver(
       (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
+        for (const entry of entries) {
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.35) {
             setView(entry.target.id);
+            break;
           }
-        });
+        }
       },
-      { threshold: 0.5 }
+      { threshold: 0.35 }
     );
     const sections = ['home', 'notes', 'students'].map((id) => document.getElementById(id)).filter(Boolean);
     sections.forEach((s) => observer.observe(s));
-    return () => sections.forEach((s) => observer.unobserve(s));
-  }, [view]);
+    return () => observer.disconnect();
+  }, [signedIn]);
 
 
   return (
@@ -419,19 +428,31 @@ function App() {
         </header>
 
         <main className="main-content"><Suspense fallback={<div className="loading-skeleton">Loading view...</div>}>
-          {view === 'profile' && signedIn ? <ProfileView user={session.user} onSave={handleProfileSave} onBack={() => setView('home')} /> : <>
-            <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
-            <div id="notes">
-              {signedIn
-                ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 9)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} />
-                : <section className="page-width access-section card"><LockKeyhole size={32} /><div><h2>Sign in to enter the library.</h2><p>Unlock premium notes and your student space.</p></div></section>}
+          {view === 'profile' && signedIn ? (
+            <ProfileView user={session.user} onSave={handleProfileSave} onBack={() => setView('home')} />
+          ) : view === 'admin' && canManageContent ? (
+            <div id="admin">
+              {isAdmin ? (
+                <>
+                  <AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} roleRequests={adminRoleRequests} canApproveAdminRequests={canApproveAdminRequests} onRoleRequestDecision={handleAdminRoleRequestDecision} onExport={handleExportUsers} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onDeleteAll={handleDeleteAllUsers} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} />
+                  <ContentAdminManager users={adminUsers} canApproveAdminRequests={canApproveAdminRequests} onSavePermissions={handleSetContentPermissions} />
+                </>
+              ) : (
+                <ContentAdminView folders={folders} notes={adminNotes} permissions={session.user.role === 'content_admin' ? Object.fromEntries(notePermissionOptions.map(({ key }) => [key, true])) : (session.user.permissions || {})} onCreateNote={handleAdminNote} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onNoteStatus={handleNoteStatus} />
+              )}
             </div>
-            <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
-            {signedIn && <NoticeBoard notices={noticeBoard} canManage={canManageContent || isAdmin} onCreateNotice={handleCreateNotice} onDeleteNotice={handleDeleteNotice} onEditNotice={handleEditNotice} />}
-            {isAdmin && <div id="admin"><AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} roleRequests={adminRoleRequests} canApproveAdminRequests={canApproveAdminRequests} onRoleRequestDecision={handleAdminRoleRequestDecision} onExport={handleExportUsers} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onDeleteAll={handleDeleteAllUsers} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} /></div>}
-            {isAdmin && <ContentAdminManager users={adminUsers} canApproveAdminRequests={canApproveAdminRequests} onSavePermissions={handleSetContentPermissions} />}
-            {canManageContent && !isAdmin && <div id="admin"><ContentAdminView folders={folders} notes={adminNotes} permissions={session.user.role === 'content_admin' ? Object.fromEntries(notePermissionOptions.map(({ key }) => [key, true])) : (session.user.permissions || {})} onCreateNote={handleAdminNote} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onNoteStatus={handleNoteStatus} /></div>}
-          </>}
+          ) : (
+            <>
+              <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
+              <div id="notes">
+                {signedIn
+                  ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 9)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} />
+                  : <section className="page-width access-section card"><LockKeyhole size={32} /><div><h2>Sign in to enter the library.</h2><p>Unlock premium notes and your student space.</p></div></section>}
+              </div>
+              <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
+              {signedIn && <NoticeBoard notices={noticeBoard} canManage={canManageContent || isAdmin} onCreateNotice={handleCreateNotice} onDeleteNotice={handleDeleteNotice} onEditNotice={handleEditNotice} />}
+            </>
+          )}
         </Suspense></main>
       </div>
 
@@ -469,15 +490,25 @@ function App() {
 }
 
 function Home({ onExplore, onSignIn, signedIn }) {
-  // Parallax: the desk items drift slightly with the pointer (skipped for reduced motion).
+  // Parallax: the desk items drift slightly with the pointer (only for precise mouse devices, skipped on touchscreens)
   useEffect(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    // Only run on desktop with a real mouse pointer
+    const hasFinePointer = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(pointer: fine)').matches
+    if (!hasFinePointer || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+
     const root = document.documentElement
+    let ticking = false
     const move = (e) => {
-      root.style.setProperty('--mx', ((e.clientX / window.innerWidth) * 2 - 1).toFixed(3))
-      root.style.setProperty('--my', ((e.clientY / window.innerHeight) * 2 - 1).toFixed(3))
+      if (!ticking) {
+        window.requestAnimationFrame(() => {
+          root.style.setProperty('--mx', ((e.clientX / window.innerWidth) * 2 - 1).toFixed(2))
+          root.style.setProperty('--my', ((e.clientY / window.innerHeight) * 2 - 1).toFixed(2))
+          ticking = false
+        })
+        ticking = true
+      }
     }
-    window.addEventListener('pointermove', move)
+    window.addEventListener('pointermove', move, { passive: true })
     return () => window.removeEventListener('pointermove', move)
   }, [])
 

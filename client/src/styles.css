@@ -116,11 +116,13 @@ body::before {
     radial-gradient(circle at 75% 30%, rgba(168, 85, 247, 0.07) 0%, transparent 35%),
     radial-gradient(circle at 60% 85%, rgba(245, 158, 11, 0.06) 0%, transparent 35%);
   animation: aurora-drift 24s infinite alternate ease-in-out;
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
 }
 @keyframes aurora-drift {
-  0%   { transform: scale(1) translate(0, 0); }
-  50%  { transform: scale(1.05) translate(15px, -15px); }
-  100% { transform: scale(0.98) translate(-10px, 10px); }
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  50%  { transform: translate3d(15px, -15px, 0) scale(1.05); }
+  100% { transform: translate3d(-10px, 10px, 0) scale(0.98); }
 }
 
 /* Page Entry */
@@ -1315,6 +1317,56 @@ select option { background: var(--surface); color: var(--text-primary); }
   }
   input, select, textarea {
     font-size: 16px !important; /* Prevents auto-zoom on mobile safari */
+  }
+
+  /* ===== MOBILE PERFORMANCE ENGINE (SPEED UP PHONES) ===== */
+  /* 1. Stop background aurora repainting loop on phones */
+  body::before {
+    display: none !important;
+  }
+
+  /* 2. Fast single-pass dark background for phones instead of 6 heavy stacked gradients */
+  body {
+    background: #080c16 !important;
+    background-image: radial-gradient(circle at 50% 12%, rgba(0, 242, 254, 0.08) 0%, transparent 60%) !important;
+  }
+
+  /* 3. Disable battery-draining backdrop blurs on mobile for instant 60/120fps scrolling */
+  .modal-card,
+  .toast-notification,
+  .sidebar,
+  .mobile-header,
+  .card,
+  .note-card,
+  .stat-note,
+  .admin-panel,
+  .student-card-form,
+  .latest-head,
+  .notice-text-wrapper,
+  .notice-icon-frame,
+  .searchbar {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  /* 4. Hardware-accelerated smooth scrolling */
+  .main-content-wrapper,
+  .main-content,
+  .page-width,
+  .notes-grid {
+    -webkit-overflow-scrolling: touch;
+    transform: translateZ(0);
+  }
+
+  /* 5. Virtualized off-screen rendering: phone browser skips off-screen sections until scrolled */
+  #home, #notes, #students, .creative-upload-space {
+    content-visibility: auto;
+    contain-intrinsic-size: 1px 350px;
+  }
+
+  /* 6. Hardware-promote ticker marquee */
+  .marquee-track {
+    will-change: transform;
   }
 }
 
