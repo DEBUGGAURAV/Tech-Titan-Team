@@ -11,7 +11,7 @@ export default function UploadDocumentSpace() {
       background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.9) 100%)',
       border: '2px solid rgba(0, 242, 254, 0.4)',
       borderRadius: '24px',
-      padding: '40px',
+      padding: 'clamp(20px, 4vw, 40px)',
       boxShadow: '0 20px 50px rgba(0, 0, 0, 0.5), 0 0 30px rgba(0, 242, 254, 0.15)',
       overflow: 'hidden'
     }}>

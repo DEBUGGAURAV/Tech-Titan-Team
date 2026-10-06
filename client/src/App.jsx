@@ -1,17 +1,14 @@
 import React, { useEffect, useState, Suspense, lazy } from 'react'
 import {
-  ArrowUpRight, BookOpen, Check, ChevronDown, Clock3, Download, FileText,
-  GraduationCap, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Pencil, Plus, Trash2,
-  Search, Settings2, ShieldCheck, Sparkles, UploadCloud, Users, X, Zap, Bell,
+  ArrowUpRight, Clock3, FileText, LockKeyhole, Menu, X, Bell,
 } from 'lucide-react'
 import {
-  changePassword, createFolder, createNote, createNotice, deleteAdminUser,
+  createFolder, createNote, createNotice, deleteAdminUser,
   deleteAllAdminUsers, deleteFolder, deleteNote, deleteNotice, updateNotice, decideAdminRoleRequest,
-  forgotPassword, getAdminNotes, getAdminRoleRequests, getAdminUserDetails,
-  getAdminUsers, getFolders, getNotices,
-  getNotes, recordLogout, recordNoteAccess, requestSignupCode, resetPassword,
-  setUserBlocked, setUserPermissions, signIn, signUp, updateAdminUser,
-  updateFolder, updateNote, updateProfile, verifySignupCode, downloadAdminExport,
+  getAdminNotes, getAdminRoleRequests, getAdminUsers, getFolders, getNotices,
+  getNotes, recordLogout, recordNoteAccess,
+  setUserBlocked, setUserPermissions, updateAdminUser,
+  updateFolder, updateNote, updateProfile, downloadAdminExport,
 } from './api'
 const AuthModal = lazy(() => import('./components/AuthModal'))
 const NotesView = lazy(() => import('./components/NotesView'))
@@ -22,7 +19,6 @@ import NoticeBoard from './components/NoticeBoard'
 const AdminView = lazy(() => import('./components/AdminView'))
 import { AddNoteModal } from './components/UploadForms'
 import { ContentAdminManager, ContentAdminView } from './components/ContentAdmin'
-import UploadDocumentSpace from './components/UploadDocumentSpace'
 
 const years = ['1st year', '2nd year', '3rd year', '4th year']
 const subjects = ['Cloud Computing (CC)', 'Cryptography (CNS)', 'Artificial Intelligence (AI)', 'Deep Learning']

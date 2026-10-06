@@ -106,7 +106,7 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
       <div style={{
         position: 'relative',
         borderRadius: '24px',
-        padding: '36px 32px 28px',
+        padding: 'clamp(20px, 4vw, 36px) clamp(16px, 3.5vw, 32px)',
         background: 'linear-gradient(145deg, rgba(16, 26, 48, 0.95) 0%, rgba(10, 18, 36, 0.98) 100%)',
         border: '1.5px solid rgba(0, 242, 254, 0.35)',
         boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6), 0 0 30px rgba(0, 242, 254, 0.1)',
@@ -538,7 +538,7 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
         <div style={{
           position: 'relative',
           flex: '1',
-          minWidth: '260px',
+          minWidth: 'min(100%, 260px)',
           maxWidth: '460px'
         }}>
           <Search size={17} style={{
