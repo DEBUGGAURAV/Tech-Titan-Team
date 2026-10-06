@@ -11,6 +11,7 @@ import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
 import Mailjet from 'node-mailjet'
+import nodemailer from 'nodemailer'
 import { cert, getApps, initializeApp } from 'firebase-admin/app'
 import { getFirestore, FieldValue } from 'firebase-admin/firestore'
 import * as XLSX from 'xlsx'
@@ -75,6 +76,83 @@ const resetStore = new Map()
 const mailjet = process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY
   ? Mailjet.apiConnect(process.env.MAILJET_API_KEY, process.env.MAILJET_SECRET_KEY)
   : null
+
+const createSmtpTransport = () => {
+  const gmailUser = process.env.GMAIL_USER || (process.env.SMTP_USER?.includes('@gmail.com') ? process.env.SMTP_USER : null)
+  const gmailPass = process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASS || (gmailUser ? process.env.SMTP_PASS : null)
+
+  if (gmailUser && gmailPass) {
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: gmailUser.trim(), pass: gmailPass.replace(/\s+/g, '') },
+    })
+  }
+
+  const host = process.env.SMTP_HOST
+  const port = Number(process.env.SMTP_PORT || 587)
+  const user = process.env.SMTP_USER
+  const pass = process.env.SMTP_PASS
+
+  if (host && user && pass) {
+    return nodemailer.createTransport({
+      host: host.trim(),
+      port,
+      secure: port === 465,
+      auth: { user: user.trim(), pass: pass.trim() },
+    })
+  }
+
+  return null
+}
+
+const sendEmail = async ({ to, subject, text, html }) => {
+  let lastError = null
+
+  // 1. Try Mailjet REST API first if configured
+  if (mailjet && process.env.MAILJET_SENDER_EMAIL) {
+    try {
+      const response = await mailjet.post('send', { version: 'v3.1' }).request({
+        Messages: [{
+          From: {
+            Email: process.env.MAILJET_SENDER_EMAIL.trim(),
+            Name: 'Tech Titan Team',
+          },
+          To: [{ Email: to.trim() }],
+          Subject: subject,
+          TextPart: text,
+          HTMLPart: html,
+        }],
+      })
+      console.log(`[Mailjet] Successfully delivered email to ${to}`)
+      return { success: true, provider: 'mailjet', response }
+    } catch (err) {
+      lastError = err
+      console.warn(`[Mailjet Warning] Delivery failed to ${to}:`, err.statusCode || '', err.message || err)
+    }
+  }
+
+  // 2. Try Nodemailer / Gmail SMTP fallback
+  const smtp = createSmtpTransport()
+  if (smtp) {
+    try {
+      const sender = process.env.MAILJET_SENDER_EMAIL || process.env.GMAIL_USER || process.env.SMTP_USER || 'no-reply@techtitanteam.com'
+      const info = await smtp.sendMail({
+        from: `"Tech Titan Team" <${sender.trim()}>`,
+        to: to.trim(),
+        subject,
+        text,
+        html,
+      })
+      console.log(`[SMTP] Successfully delivered email to ${to} (MessageId: ${info.messageId})`)
+      return { success: true, provider: 'smtp', info }
+    } catch (err) {
+      lastError = err
+      console.warn(`[SMTP Warning] Delivery failed to ${to}:`, err.message || err)
+    }
+  }
+
+  return { success: false, error: lastError }
+}
 let rawFirebaseApp = null
 let rawDb = null
 
@@ -1470,81 +1548,80 @@ app.post('/api/auth/request-otp', otpLimiter, async (req, res) => {
     const code = String(crypto.randomInt(100000, 1000000))
     otpStore.set(normalizedEmail, { code, purpose, expires: Date.now() + 10 * 60 * 1000 })
     
-    if (mailjet && process.env.MAILJET_SENDER_EMAIL) {
-      try {
-        await mailjet.post('send', { version: 'v3.1' }).request({
-          Messages: [{
-            From: { Email: process.env.MAILJET_SENDER_EMAIL, Name: 'Tech Titan Team' },
-            To: [{ Email: normalizedEmail }],
-            Subject: '⚡ Tech Titan Team // Your Secret Access Key is ' + code,
-            TextPart: `⚡ TECH TITAN TEAM — OFFICIAL VERIFICATION CODE\n\nWelcome to Tech Titan Team.\n\nYour 6-Digit Secure Passcode is:\n===================================\n          >>> ${code} <<<\n===================================\n\n🔒 This passcode expires in exactly 10 minutes.\nFor your security, never share this code with anyone.\n\nForge ahead,\nTech Titan Team`,
-            HTMLPart: `
-              <!DOCTYPE html>
-              <html lang="en">
-                <head>
-                  <meta charset="UTF-8" />
-                  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-                  <title>Tech Titan Team Verification</title>
-                </head>
-                <body style="margin:0; padding:0; background-color:#080c16; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#cbd5e1;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#080c16; padding:40px 15px;">
+    const emailResult = await sendEmail({
+      to: normalizedEmail,
+      subject: '⚡ Tech Titan Team // Your Secret Access Key is ' + code,
+      text: `⚡ TECH TITAN TEAM — OFFICIAL VERIFICATION CODE\n\nWelcome to Tech Titan Team.\n\nYour 6-Digit Secure Passcode is:\n===================================\n          >>> ${code} <<<\n===================================\n\n🔒 This passcode expires in exactly 10 minutes.\nFor your security, never share this code with anyone.\n\nForge ahead,\nTech Titan Team`,
+      html: `
+        <!DOCTYPE html>
+        <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <title>Tech Titan Team Verification</title>
+          </head>
+          <body style="margin:0; padding:0; background-color:#080c16; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#cbd5e1;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#080c16; padding:40px 15px;">
+              <tr>
+                <td align="center">
+                  <table role="presentation" width="100%" style="max-width:580px; background:linear-gradient(145deg, #0f172a 0%, #090f1f 100%); border-radius:20px; overflow:hidden; border:1.5px solid #00f2fe; box-shadow:0 20px 60px rgba(0,0,0,0.8), 0 0 35px rgba(0,242,254,0.25);">
                     <tr>
-                      <td align="center">
-                        <table role="presentation" width="100%" style="max-width:580px; background:linear-gradient(145deg, #0f172a 0%, #090f1f 100%); border-radius:20px; overflow:hidden; border:1.5px solid #00f2fe; box-shadow:0 20px 60px rgba(0,0,0,0.8), 0 0 35px rgba(0,242,254,0.25);">
-                          <tr>
-                            <td style="height:4px; background:linear-gradient(90deg, #00f2fe 0%, #38bdf8 50%, #c084fc 100%);"></td>
-                          </tr>
-                          <tr>
-                            <td style="padding:36px 32px 20px; text-align:center;">
-                              <div style="display:inline-block; padding:4px 14px; border-radius:30px; background:rgba(0,242,254,0.12); border:1px solid rgba(0,242,254,0.35); color:#00f2fe; font-size:12px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:16px;">
-                                ⚡ TECH TITAN TEAM // SECURITY SYSTEM
-                              </div>
-                              <h1 style="margin:0; color:#f8fafc; font-size:28px; font-weight:900; letter-spacing:-0.5px;">
-                                Welcome to Tech Titan Team
-                              </h1>
-                              <p style="margin:10px 0 0; color:#94a3b8; font-size:15px; line-height:1.5;">
-                                Your single-use access cipher has been synthesized. Use this code to verify your student account.
-                              </p>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td style="padding:10px 32px 30px; text-align:center;">
-                              <div style="background:rgba(0,0,0,0.5); border:1.5px solid rgba(0,242,254,0.5); border-radius:14px; padding:24px 20px; margin:10px 0 24px; box-shadow:inset 0 0 25px rgba(0,242,254,0.15);">
-                                <span style="display:block; font-size:12px; font-weight:700; color:#38bdf8; letter-spacing:1px; text-transform:uppercase; margin-bottom:8px;">One-Time Verification Cipher</span>
-                                <span style="font-family:'Courier New', Courier, monospace; font-size:42px; font-weight:900; letter-spacing:12px; color:#00f2fe; text-shadow:0 0 15px rgba(0,242,254,0.6); display:inline-block; padding-left:12px;">${code}</span>
-                              </div>
-                              <div style="display:inline-block; color:#fbbf24; font-size:13px; font-weight:700;">
-                                ⏳ Temporal validity: 10 minutes only.
-                              </div>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td style="padding:24px 32px; background:rgba(0,0,0,0.35); border-top:1px solid rgba(255,255,255,0.06); text-align:center;">
-                              <p style="margin:0 0 10px; color:#64748b; font-size:12px; line-height:1.5;">
-                                If you did not initiate this request, disregard this transmission. Never disclose this cipher to anyone.
-                              </p>
-                              <div style="margin-top:14px; color:#38bdf8; font-size:13px; font-weight:800;">
-                                — Tech Titan Team Collective
-                              </div>
-                            </td>
-                          </tr>
-                        </table>
+                      <td style="height:4px; background:linear-gradient(90deg, #00f2fe 0%, #38bdf8 50%, #c084fc 100%);"></td>
+                    </tr>
+                    <tr>
+                      <td style="padding:36px 32px 20px; text-align:center;">
+                        <div style="display:inline-block; padding:4px 14px; border-radius:30px; background:rgba(0,242,254,0.12); border:1px solid rgba(0,242,254,0.35); color:#00f2fe; font-size:12px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:16px;">
+                          ⚡ TECH TITAN TEAM // SECURITY SYSTEM
+                        </div>
+                        <h1 style="margin:0; color:#f8fafc; font-size:28px; font-weight:900; letter-spacing:-0.5px;">
+                          Welcome to Tech Titan Team
+                        </h1>
+                        <p style="margin:10px 0 0; color:#94a3b8; font-size:15px; line-height:1.5;">
+                          Your single-use access cipher has been synthesized. Use this code to verify your student account.
+                        </p>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style="padding:10px 32px 30px; text-align:center;">
+                        <div style="background:rgba(0,0,0,0.5); border:1.5px solid rgba(0,242,254,0.5); border-radius:14px; padding:24px 20px; margin:10px 0 24px; box-shadow:inset 0 0 25px rgba(0,242,254,0.15);">
+                          <span style="display:block; font-size:12px; font-weight:700; color:#38bdf8; letter-spacing:1px; text-transform:uppercase; margin-bottom:8px;">One-Time Verification Cipher</span>
+                          <span style="font-family:'Courier New', Courier, monospace; font-size:42px; font-weight:900; letter-spacing:12px; color:#00f2fe; text-shadow:0 0 15px rgba(0,242,254,0.6); display:inline-block; padding-left:12px;">${code}</span>
+                        </div>
+                        <div style="display:inline-block; color:#fbbf24; font-size:13px; font-weight:700;">
+                          ⏳ Temporal validity: 10 minutes only.
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style="padding:24px 32px; background:rgba(0,0,0,0.35); border-top:1px solid rgba(255,255,255,0.06); text-align:center;">
+                        <p style="margin:0 0 10px; color:#64748b; font-size:12px; line-height:1.5;">
+                          If you did not initiate this request, disregard this transmission. Never disclose this cipher to anyone.
+                        </p>
+                        <div style="margin-top:14px; color:#38bdf8; font-size:13px; font-weight:800;">
+                          — Tech Titan Team Collective
+                        </div>
                       </td>
                     </tr>
                   </table>
-                </body>
-              </html>
-            `,
-          }],
-        })
-        console.log(`[Mailjet] Sent OTP to ${normalizedEmail}`)
-      } catch (mailErr) {
-        console.error(`[Mailjet Warning] Failed to send email to ${normalizedEmail}:`, mailErr.message)
-      }
-    } else {
-      console.log(`[Development OTP] Code for ${normalizedEmail}: ${code}`)
-    }
+                </td>
+              </tr>
+            </table>
+          </body>
+        </html>
+      `,
+    })
+
     console.log(`[Signup OTP for ${normalizedEmail}]: ${code}`)
+
+    if (!emailResult.success) {
+      console.warn(`[OTP Warning] Email delivery failed to ${normalizedEmail}:`, emailResult.error?.message || emailResult.error)
+      if (process.env.NODE_ENV === 'production' && !emailResult.success && !process.env.DEV_BYPASS) {
+        return res.status(502).json({
+          message: 'Email service error: Failed to deliver verification code. Please check Mailjet API keys or configure Gmail App Password in Render Dashboard.',
+          error: emailResult.error?.message || 'Mail service delivery failure'
+        })
+      }
+    }
     res.json({ message: 'Verification code sent' })
   } catch (err) {
     console.error('[Request OTP Error]:', err)
@@ -1606,121 +1683,137 @@ app.post('/api/auth/signup', async (req, res) => {
 
 app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   const normalizedEmail = req.body.email?.toLowerCase().trim()
-  const userRef = db.collection('users').doc(Buffer.from(normalizedEmail || '').toString('base64url'))
+  if (!normalizedEmail || !normalizedEmail.includes('@gmail.com')) {
+    return res.status(400).json({ message: 'Enter the email that contain @gmail.com' })
+  }
+
+  // 1. Locate user doc: check base64url doc ID first, then fall back to email query
+  let userDoc = null
+  const userRef = db.collection('users').doc(Buffer.from(normalizedEmail).toString('base64url'))
   const snapshot = await userRef.get()
   if (snapshot.exists) {
-    const resetToken = crypto.randomBytes(32).toString('hex')
-    resetStore.set(resetToken, { userId: userRef.id, expires: Date.now() + 15 * 60 * 1000 })
-
-    // Intelligently resolve the client application URL (supporting custom domains, Render, and local dev)
-    let clientOrigin = ''
-    if (req.headers.origin && typeof req.headers.origin === 'string') {
-      clientOrigin = req.headers.origin.trim()
-    } else if (req.headers.referer && typeof req.headers.referer === 'string') {
-      try {
-        clientOrigin = new URL(req.headers.referer).origin
-      } catch (_) {}
-    }
-
-    if (!clientOrigin || clientOrigin === 'null') {
-      clientOrigin = process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',')[0].trim() : 'https://notessharinggroup.onrender.com'
-    }
-
-    const reqHost = req.headers.host || ''
-    if (clientOrigin.includes('localhost') && reqHost && !reqHost.includes('localhost') && !reqHost.includes('127.0.0.1')) {
-      clientOrigin = 'https://notessharinggroup.onrender.com'
-    }
-
-    clientOrigin = clientOrigin.replace(/\/+$/, '')
-    const resetUrl = `${clientOrigin}/?reset=${resetToken}`
-
-    if (mailjet && process.env.MAILJET_SENDER_EMAIL) {
-      try {
-        await mailjet.post('send', { version: 'v3.1' }).request({
-          Messages: [{
-            From: { Email: process.env.MAILJET_SENDER_EMAIL, Name: 'Tech Titan Team' },
-            To: [{ Email: normalizedEmail }],
-            Subject: '⚡ Tech Titan Team // Password Reset Protocol Initiated',
-            TextPart: `⚡ TECH TITAN TEAM — ACCESS RECOVERY PROTOCOL\n\nGreetings Student,\n\nA password reset transmission was authorized for your student identity.\nClick or paste the secure link below to reset your password:\n\n=======================================================\n>>> ACCESS RECOVERY LINK:\n${resetUrl}\n=======================================================\n\n⏳ Temporal Validity: Exactly 15 minutes.\n🔒 Single-Use Protocol: Once updated, this token is permanently invalidated.\n\nIf you did not initiate this request, your account credentials remain strictly safe. You can safely disregard this message.\n\n— Tech Titan Team Collective`,
-            HTMLPart: `
-              <!DOCTYPE html>
-              <html lang="en">
-                <head>
-                  <meta charset="UTF-8" />
-                  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-                  <title>Tech Titan Team — Access Recovery</title>
-                </head>
-                <body style="margin:0; padding:0; background-color:#080c16; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#cbd5e1;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#080c16; padding:40px 15px;">
-                    <tr>
-                      <td align="center">
-                        <table role="presentation" width="100%" style="max-width:580px; background:linear-gradient(145deg, #0f172a 0%, #090f1f 100%); border-radius:20px; overflow:hidden; border:1.5px solid #00f2fe; box-shadow:0 20px 60px rgba(0,0,0,0.8), 0 0 35px rgba(0,242,254,0.25);">
-                          <tr>
-                            <td style="height:4px; background:linear-gradient(90deg, #00f2fe 0%, #38bdf8 40%, #818cf8 70%, #c084fc 100%);"></td>
-                          </tr>
-                          <tr>
-                            <td style="padding:36px 32px 20px; text-align:center;">
-                              <div style="display:inline-block; padding:4px 14px; border-radius:30px; background:rgba(0,242,254,0.12); border:1px solid rgba(0,242,254,0.35); color:#00f2fe; font-size:12px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:16px;">
-                                ⚡ TECH TITAN TEAM // SECURITY SYSTEM
-                              </div>
-                              <h1 style="margin:0; color:#f8fafc; font-size:28px; font-weight:900; letter-spacing:-0.5px;">
-                                Access Recovery Protocol
-                              </h1>
-                              <p style="margin:12px 0 0; color:#94a3b8; font-size:15px; line-height:1.6;">
-                                A password reset transmission was authorized for your student identity. Press the button below to regenerate your master access credentials.
-                              </p>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td style="padding:10px 32px 30px; text-align:center;">
-                              <div style="background:rgba(0,0,0,0.5); border:1.5px solid rgba(0,242,254,0.4); border-radius:16px; padding:28px 24px; margin:10px 0 20px; box-shadow:inset 0 0 25px rgba(0,242,254,0.12);">
-                                <div style="margin-bottom:22px;">
-                                  <a href="${resetUrl}" target="_blank" style="display:inline-block; background:linear-gradient(135deg, #00f2fe 0%, #0284c7 100%); color:#030712; font-size:15px; font-weight:800; text-decoration:none; padding:15px 36px; border-radius:12px; letter-spacing:0.5px; box-shadow:0 0 25px rgba(0,242,254,0.5), 0 4px 12px rgba(0,0,0,0.4); text-transform:uppercase;">
-                                    RESET ACCESS KEY ➔
-                                  </a>
-                                </div>
-                                <p style="margin:0 0 8px; color:#64748b; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.8px;">
-                                  Direct Authorization Link:
-                                </p>
-                                <div style="background:rgba(15,23,42,0.9); border:1px dashed rgba(56,189,248,0.4); border-radius:8px; padding:12px 14px; word-break:break-all; text-align:left;">
-                                  <a href="${resetUrl}" target="_blank" style="font-family:'Courier New', Courier, monospace; font-size:12px; color:#38bdf8; text-decoration:underline;">
-                                    ${resetUrl}
-                                  </a>
-                                </div>
-                              </div>
-                              <div style="display:inline-block; color:#fbbf24; font-size:13px; font-weight:700;">
-                                ⏳ Temporal validity: 15 minutes only.
-                              </div>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td style="padding:24px 32px; background:rgba(0,0,0,0.35); border-top:1px solid rgba(255,255,255,0.06); text-align:center;">
-                              <p style="margin:0 0 10px; color:#64748b; font-size:12px; line-height:1.6;">
-                                If you did not request a password reset, no action is needed — your account remains strictly secure. Never forward this link to anyone.
-                              </p>
-                              <div style="margin-top:14px; color:#38bdf8; font-size:13px; font-weight:800;">
-                                — Tech Titan Team Collective
-                              </div>
-                            </td>
-                          </tr>
-                        </table>
-                      </td>
-                    </tr>
-                  </table>
-                </body>
-              </html>
-            `,
-          }],
-        })
-        console.log(`[Mailjet] Sent password reset link to ${normalizedEmail}`)
-      } catch (mailErr) {
-        console.error(`[Mailjet Warning] Failed to send password reset email to ${normalizedEmail}:`, mailErr.message)
-      }
-    } else {
-      console.log(`[Development Reset] Link for ${normalizedEmail}: ${resetUrl}`)
+    userDoc = snapshot
+  } else {
+    const querySnapshot = await db.collection('users').where('email', '==', normalizedEmail).limit(1).get()
+    if (!querySnapshot.empty) {
+      userDoc = querySnapshot.docs[0]
     }
   }
-  res.json({ message: 'If that email has an account, a password reset link has been sent.' })
+
+  if (!userDoc) {
+    return res.status(404).json({ message: 'No registered student account found with this email. Please verify your address or create an account.' })
+  }
+
+  const resetToken = crypto.randomBytes(32).toString('hex')
+  resetStore.set(resetToken, { userId: userDoc.id, expires: Date.now() + 15 * 60 * 1000 })
+
+  // Intelligently resolve the client application URL (supporting custom domains, Render, and local dev)
+  let clientOrigin = ''
+  if (req.headers.origin && typeof req.headers.origin === 'string') {
+    clientOrigin = req.headers.origin.trim()
+  } else if (req.headers.referer && typeof req.headers.referer === 'string') {
+    try {
+      clientOrigin = new URL(req.headers.referer).origin
+    } catch (_) {}
+  }
+
+  if (!clientOrigin || clientOrigin === 'null') {
+    clientOrigin = process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',')[0].trim() : 'https://notessharinggroup.onrender.com'
+  }
+
+  const reqHost = req.headers.host || ''
+  if (clientOrigin.includes('localhost') && reqHost && !reqHost.includes('localhost') && !reqHost.includes('127.0.0.1')) {
+    clientOrigin = 'https://notessharinggroup.onrender.com'
+  }
+
+  clientOrigin = clientOrigin.replace(/\/+$/, '')
+  const resetUrl = `${clientOrigin}/?reset=${resetToken}`
+
+  console.log(`[Password Reset Generated] Link for ${normalizedEmail}: ${resetUrl}`)
+
+  const emailResult = await sendEmail({
+    to: normalizedEmail,
+    subject: '⚡ Tech Titan Team // Password Reset Protocol Initiated',
+    text: `⚡ TECH TITAN TEAM — ACCESS RECOVERY PROTOCOL\n\nGreetings Student,\n\nA password reset transmission was authorized for your student identity.\nClick or paste the secure link below to reset your password:\n\n=======================================================\n>>> ACCESS RECOVERY LINK:\n${resetUrl}\n=======================================================\n\n⏳ Temporal Validity: Exactly 15 minutes.\n🔒 Single-Use Protocol: Once updated, this token is permanently invalidated.\n\nIf you did not initiate this request, your account credentials remain strictly safe. You can safely disregard this message.\n\n— Tech Titan Team Collective`,
+    html: `
+      <!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>Tech Titan Team — Access Recovery</title>
+        </head>
+        <body style="margin:0; padding:0; background-color:#080c16; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#cbd5e1;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#080c16; padding:40px 15px;">
+            <tr>
+              <td align="center">
+                <table role="presentation" width="100%" style="max-width:580px; background:linear-gradient(145deg, #0f172a 0%, #090f1f 100%); border-radius:20px; overflow:hidden; border:1.5px solid #00f2fe; box-shadow:0 20px 60px rgba(0,0,0,0.8), 0 0 35px rgba(0,242,254,0.25);">
+                  <tr>
+                    <td style="height:4px; background:linear-gradient(90deg, #00f2fe 0%, #38bdf8 40%, #818cf8 70%, #c084fc 100%);"></td>
+                  </tr>
+                  <tr>
+                    <td style="padding:36px 32px 20px; text-align:center;">
+                      <div style="display:inline-block; padding:4px 14px; border-radius:30px; background:rgba(0,242,254,0.12); border:1px solid rgba(0,242,254,0.35); color:#00f2fe; font-size:12px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:16px;">
+                        ⚡ TECH TITAN TEAM // SECURITY SYSTEM
+                      </div>
+                      <h1 style="margin:0; color:#f8fafc; font-size:28px; font-weight:900; letter-spacing:-0.5px;">
+                        Access Recovery Protocol
+                      </h1>
+                      <p style="margin:12px 0 0; color:#94a3b8; font-size:15px; line-height:1.6;">
+                        A password reset transmission was authorized for your student identity. Press the button below to regenerate your master access credentials.
+                      </p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:10px 32px 30px; text-align:center;">
+                      <div style="background:rgba(0,0,0,0.5); border:1.5px solid rgba(0,242,254,0.4); border-radius:16px; padding:28px 24px; margin:10px 0 20px; box-shadow:inset 0 0 25px rgba(0,242,254,0.12);">
+                        <div style="margin-bottom:22px;">
+                          <a href="${resetUrl}" target="_blank" style="display:inline-block; background:linear-gradient(135deg, #00f2fe 0%, #0284c7 100%); color:#030712; font-size:15px; font-weight:800; text-decoration:none; padding:15px 36px; border-radius:12px; letter-spacing:0.5px; box-shadow:0 0 25px rgba(0,242,254,0.5), 0 4px 12px rgba(0,0,0,0.4); text-transform:uppercase;">
+                            RESET ACCESS KEY ➔
+                          </a>
+                        </div>
+                        <p style="margin:0 0 8px; color:#64748b; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.8px;">
+                          Direct Authorization Link:
+                        </p>
+                        <div style="background:rgba(15,23,42,0.9); border:1px dashed rgba(56,189,248,0.4); border-radius:8px; padding:12px 14px; word-break:break-all; text-align:left;">
+                          <a href="${resetUrl}" target="_blank" style="font-family:'Courier New', Courier, monospace; font-size:12px; color:#38bdf8; text-decoration:underline;">
+                            ${resetUrl}
+                          </a>
+                        </div>
+                      </div>
+                      <div style="display:inline-block; color:#fbbf24; font-size:13px; font-weight:700;">
+                        ⏳ Temporal validity: 15 minutes only.
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:24px 32px; background:rgba(0,0,0,0.35); border-top:1px solid rgba(255,255,255,0.06); text-align:center;">
+                      <p style="margin:0 0 10px; color:#64748b; font-size:12px; line-height:1.6;">
+                        If you did not request a password reset, no action is needed — your account remains strictly secure. Never forward this link to anyone.
+                      </p>
+                      <div style="margin-top:14px; color:#38bdf8; font-size:13px; font-weight:800;">
+                        — Tech Titan Team Collective
+                      </div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+      </html>
+    `,
+  })
+
+  if (!emailResult.success) {
+    console.error(`[Email Delivery Failure] Failed to send to ${normalizedEmail}:`, emailResult.error?.message || emailResult.error)
+    return res.status(502).json({
+      message: 'Email delivery failed. The email service rejected the request (e.g. Mailjet API key 401 Unauthorized). The reset link was generated in server console. Please configure valid Mailjet keys or Gmail App Password in server environment.',
+      error: emailResult.error?.message || 'Mail service delivery failure',
+    })
+  }
+
+  res.json({ message: 'Password reset link sent! Please check your email inbox and spam folder.' })
 })
 
 app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
