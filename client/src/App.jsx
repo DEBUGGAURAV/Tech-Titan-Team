@@ -393,6 +393,16 @@ function App() {
   }, [signedIn]);
 
 
+  // Lock body scroll when mobile navigation drawer is active
+  useEffect(() => {
+    if (mobileNavOpen) {
+      document.body.style.overflow = 'hidden'
+    } else {
+      document.body.style.overflow = ''
+    }
+    return () => { document.body.style.overflow = '' }
+  }, [mobileNavOpen])
+
   return (
     <div className="app-shell dashboard-layout">
       {mobileNavOpen && (
@@ -419,8 +429,41 @@ function App() {
       <div className="main-content-wrapper">
         <header className="mobile-header">
           <button className="icon-button" aria-label="Open menu" onClick={() => setMobileNavOpen(true)}><Menu size={22} /></button>
-          <span className="mobile-brand-text">Tech <i>Titan</i></span>
-          {signedIn && <button className="avatar-circle small" aria-label="Profile" onClick={() => navigate('profile')}>{session.user?.name?.slice(0, 2).toUpperCase() || 'TT'}</button>}
+          <span 
+            className="mobile-brand-text"
+            onClick={() => {
+              setView('home')
+              setMobileNavOpen(false)
+              window.scrollTo({ top: 0, behavior: 'smooth' })
+            }}
+            style={{ cursor: 'pointer' }}
+          >
+            Tech <i>Titan</i>
+          </span>
+          {signedIn ? (
+            <button 
+              className="avatar-circle small" 
+              aria-label="Profile and account settings" 
+              onClick={() => {
+                navigate('profile')
+                setMobileNavOpen(false)
+              }}
+              title="Edit profile & account details"
+            >
+              {session.user?.name?.slice(0, 2).toUpperCase() || 'TT'}
+            </button>
+          ) : (
+            <button 
+              className="button button-ghost compact-button" 
+              onClick={() => {
+                setAuthOpen(true)
+                setMobileNavOpen(false)
+              }}
+              style={{ fontSize: '0.8rem', padding: '6px 14px' }}
+            >
+              Sign in
+            </button>
+          )}
         </header>
 
         <main className="main-content"><Suspense fallback={<div className="loading-skeleton">Loading view...</div>}>

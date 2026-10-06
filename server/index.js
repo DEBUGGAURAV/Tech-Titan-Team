@@ -138,6 +138,42 @@ const db = new Proxy({}, {
 const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean))
 const noticeBoardCollection = () => db.collection('noticeBoard')
 const noticeExpiryMs = 5 * 24 * 60 * 60 * 1000 // 5 days automatic expiration
+
+// --- IN-MEMORY CACHE & QUOTA PROTECTION LAYER ---
+const serverCache = new Map()
+
+const getFromCache = (key, maxAgeMs = 60000) => {
+  const item = serverCache.get(key)
+  if (!item) return null
+  if (Date.now() - item.timestamp > maxAgeMs) {
+    return null // Expired for normal serving, but remains available for fallback
+  }
+  return item.data
+}
+
+const getStaleFallback = (key) => {
+  const item = serverCache.get(key)
+  return item ? item.data : null
+}
+
+const saveToCache = (key, data) => {
+  serverCache.set(key, { data, timestamp: Date.now() })
+}
+
+const invalidateCache = (...keys) => {
+  for (const k of keys) {
+    serverCache.delete(k)
+  }
+}
+
+const isQuotaError = (err) => {
+  if (!err) return false
+  return err.code === 8 ||
+         err.code === 'RESOURCE_EXHAUSTED' ||
+         String(err.details || '').includes('Quota exceeded') ||
+         String(err.message || '').includes('Quota exceeded')
+}
+
 const studentYears = ['1st year', '2nd year', '3rd year', '4th year']
 const normalizeMobile = (value) => typeof value === 'string' ? value.trim() : ''
 const isProtectedAdminEmail = (email) => {
@@ -191,34 +227,29 @@ const createNoticeRecord = async ({ title, message, type = 'general' }) => {
     expiresAt: Date.now() + noticeExpiryMs,
   }
   const created = await noticeBoardCollection().add(payload)
+  invalidateCache('notices:active')
   return { id: created.id, ...payload, expiresAt: payload.expiresAt, createdAt: new Date().toISOString() }
 }
 const pruneExpiredNotices = async () => {
-  const now = Date.now()
-  const fiveDaysAgo = now - noticeExpiryMs
-  const expiredSnapshot = await noticeBoardCollection().where('expiresAt', '<=', now).get()
-  const batch = db.batch()
-  const deletedRefs = new Set()
-  expiredSnapshot.docs.forEach((snapshot) => {
-    batch.delete(snapshot.ref)
-    deletedRefs.add(snapshot.id)
-  })
-  
-  const allNotices = await noticeBoardCollection().get()
-  allNotices.docs.forEach((doc) => {
-    const data = doc.data()
-    const exp = typeof data.expiresAt === 'number' ? data.expiresAt : 0
-    const createdTime = data.createdAt?.toMillis ? data.createdAt.toMillis() : 0
-    if ((exp && exp <= now) || (createdTime && createdTime <= fiveDaysAgo)) {
-      if (!deletedRefs.has(doc.id)) {
-        batch.delete(doc.ref)
-        deletedRefs.add(doc.id)
-      }
+  try {
+    const now = Date.now()
+    const expiredSnapshot = await noticeBoardCollection().where('expiresAt', '<=', now).limit(25).get()
+    if (expiredSnapshot.empty) return 0
+    const batch = db.batch()
+    expiredSnapshot.docs.forEach((snapshot) => {
+      batch.delete(snapshot.ref)
+    })
+    await batch.commit()
+    invalidateCache('notices:active')
+    return expiredSnapshot.size
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] Notice pruning deferred due to quota limit.')
+      return 0
     }
-  })
-  
-  await batch.commit()
-  return deletedRefs.size
+    console.warn('[Notice Prune Warning]:', err.message)
+    return 0
+  }
 }
 const canManageNoticeBoard = (user) => Boolean(user) && (user.role === 'admin' || user.role === 'content_admin' || hasAnyNotePermission(user))
 const createActivityRecord = (event, req, details = {}) => ({
@@ -442,15 +473,37 @@ const serializePublicNote = (snapshot) => {
 }
 
 app.get('/api/notes', authRequired, async (_req, res) => {
-  const snapshot = await db.collection('notes').where('status', '==', 'approved').get()
-  res.json(snapshot.docs.map(serializePublicNote).sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || ''))))
+  try {
+    const cached = getFromCache('notes:public', 60000)
+    if (cached) return res.json(cached)
+
+    const snapshot = await db.collection('notes').where('status', '==', 'approved').get()
+    const notes = snapshot.docs.map(serializePublicNote).sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
+    saveToCache('notes:public', notes)
+    res.json(notes)
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] /api/notes hit quota limit. Serving cached/fallback notes.')
+      const fallback = getStaleFallback('notes:public') || []
+      return res.json(fallback)
+    }
+    console.error('[Notes Fetch Error]:', err.message)
+    res.status(500).json({ message: 'Unable to load notes right now.' })
+  }
 })
 app.post('/api/notes/:id/access', authRequired, async (req, res) => {
-  const noteSnapshot = await db.collection('notes').doc(req.params.id).get()
-  if (!noteSnapshot.exists || noteSnapshot.data().status !== 'approved') return res.status(404).json({ message: 'Note not found.' })
-  const note = noteSnapshot.data()
-  await recordUserActivity(req.user.id, req, 'note_download', { noteId: noteSnapshot.id, noteTitle: note.title || '', subject: note.subject || '' })
-  res.json({ recorded: true })
+  try {
+    const noteSnapshot = await db.collection('notes').doc(req.params.id).get()
+    if (!noteSnapshot.exists || noteSnapshot.data().status !== 'approved') return res.status(404).json({ message: 'Note not found.' })
+    const note = noteSnapshot.data()
+    await recordUserActivity(req.user.id, req, 'note_download', { noteId: noteSnapshot.id, noteTitle: note.title || '', subject: note.subject || '' }).catch(() => {})
+    res.json({ recorded: true })
+  } catch (err) {
+    if (isQuotaError(err)) {
+      return res.json({ recorded: true })
+    }
+    res.status(500).json({ message: 'Failed to record note access.' })
+  }
 })
 app.post('/api/notes', authRequired, async (req, res) => {
   const { title, subject, year, folderId, driveLink, status } = req.body
@@ -464,6 +517,7 @@ app.post('/api/notes', authRequired, async (req, res) => {
   }
   const note = { title, subject, year, folderId: folderId || '', driveLink, author: req.user.name || req.user.email, authorId: req.user.id, status: canPublish && status === 'approved' ? 'approved' : 'pending', createdAt: FieldValue.serverTimestamp() }
   const created = await db.collection('notes').add(note)
+  invalidateCache('notes:public')
   if (note.status === 'approved') {
     await createNoticeRecord({
       title: 'New note added',
@@ -499,6 +553,7 @@ app.patch('/api/notes/:id', authRequired, async (req, res) => {
   }
   const existingNote = await db.collection('notes').doc(req.params.id).get()
   await db.collection('notes').doc(req.params.id).update(changes)
+  invalidateCache('notes:public')
   if (changes.status === 'approved' && existingNote.exists) {
     await createNoticeRecord({
       title: 'New note updated',
@@ -517,30 +572,67 @@ app.patch('/api/notes/:id', authRequired, async (req, res) => {
 app.delete('/api/notes/:id', authRequired, async (req, res) => {
   if (!hasNotePermission(req.user, 'deleteNotes')) return res.status(403).json({ message: 'Note deletion access required.' })
   await db.collection('notes').doc(req.params.id).delete()
+  invalidateCache('notes:public')
   res.json({ id: req.params.id, deleted: true })
 })
 app.get('/api/admin/notes', authRequired, async (req, res) => {
   if (!hasAnyNotePermission(req.user)) return res.status(403).json({ message: 'Note management access required.' })
-  const snapshot = await db.collection('notes').orderBy('createdAt', 'desc').get()
-  const canViewAll = req.user.role === 'admin' || req.user.role === 'content_admin' || hasNotePermission(req.user, 'editNotes') || hasNotePermission(req.user, 'deleteNotes') || hasNotePermission(req.user, 'reviewNotes')
-  res.json(snapshot.docs.filter((note) => canViewAll || note.data().authorId === req.user.id).map(serialize))
+  try {
+    const snapshot = await db.collection('notes').orderBy('createdAt', 'desc').get()
+    const canViewAll = req.user.role === 'admin' || req.user.role === 'content_admin' || hasNotePermission(req.user, 'editNotes') || hasNotePermission(req.user, 'deleteNotes') || hasNotePermission(req.user, 'reviewNotes')
+    res.json(snapshot.docs.filter((note) => canViewAll || note.data().authorId === req.user.id).map(serialize))
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] /api/admin/notes hit quota limit.')
+      return res.json([])
+    }
+    res.status(500).json({ message: 'Unable to load admin notes.' })
+  }
 })
 app.get('/api/folders', authRequired, async (_req, res) => {
-  const snapshot = await db.collection('folders').get()
-  const folders = snapshot.docs.map(serialize)
-  res.json(folders.sort((left, right) => `${left.year}${left.subject}`.localeCompare(`${right.year}${right.subject}`)))
+  try {
+    const cached = getFromCache('folders:all', 60000)
+    if (cached) return res.json(cached)
+
+    const snapshot = await db.collection('folders').get()
+    const folders = snapshot.docs.map(serialize).sort((left, right) => `${left.year}${left.subject}`.localeCompare(`${right.year}${right.subject}`))
+    saveToCache('folders:all', folders)
+    res.json(folders)
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] /api/folders hit quota limit. Serving cached/fallback folders.')
+      const fallback = getStaleFallback('folders:all') || []
+      return res.json(fallback)
+    }
+    console.error('[Folders Fetch Error]:', err.message)
+    res.status(500).json({ message: 'Unable to load folders right now.' })
+  }
 })
 app.get('/api/notices', authRequired, async (_req, res) => {
-  await pruneExpiredNotices()
-  const snapshot = await noticeBoardCollection().orderBy('createdAt', 'desc').get()
-  const notices = snapshot.docs
-    .map((doc) => {
-      const notice = doc.data()
-      return { id: doc.id, title: notice.title, message: notice.message, type: notice.type || 'general', createdAt: toIso(notice.createdAt), expiresAt: typeof notice.expiresAt === 'number' ? notice.expiresAt : Date.now() + noticeExpiryMs }
-    })
-    .filter((notice) => (notice.expiresAt || Date.now()) > Date.now())
-    .sort((left, right) => Number(right.expiresAt || 0) - Number(left.expiresAt || 0))
-  res.json(notices)
+  try {
+    const cached = getFromCache('notices:active', 45000)
+    if (cached) return res.json(cached)
+
+    const now = Date.now()
+    const snapshot = await noticeBoardCollection().orderBy('createdAt', 'desc').get()
+    const notices = snapshot.docs
+      .map((doc) => {
+        const notice = doc.data()
+        return { id: doc.id, title: notice.title, message: notice.message, type: notice.type || 'general', createdAt: toIso(notice.createdAt), expiresAt: typeof notice.expiresAt === 'number' ? notice.expiresAt : now + noticeExpiryMs }
+      })
+      .filter((notice) => (notice.expiresAt || now) > now)
+      .sort((left, right) => Number(right.expiresAt || 0) - Number(left.expiresAt || 0))
+    saveToCache('notices:active', notices)
+    res.json(notices)
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] /api/notices hit quota limit. Serving cached/fallback notices.')
+      const fallback = getStaleFallback('notices:active') || []
+      return res.json(fallback)
+    }
+    console.error('[Notices Fetch Error]:', err.message)
+    res.status(500).json({ message: 'Unable to load notices right now.' })
+  }
 })
 app.post('/api/notices', authRequired, async (req, res) => {
   if (!canManageNoticeBoard(req.user)) return res.status(403).json({ message: 'Notice board management access required.' })
@@ -557,6 +649,7 @@ app.delete('/api/notices/:id', authRequired, async (req, res) => {
   const noticeSnapshot = await noticeRef.get()
   if (!noticeSnapshot.exists) return res.status(404).json({ message: 'Notice not found.' })
   await noticeRef.delete()
+  invalidateCache('notices:active')
   res.json({ id: noticeSnapshot.id, deleted: true })
 })
 app.patch('/api/notices/:id', authRequired, async (req, res) => {
@@ -570,6 +663,7 @@ app.patch('/api/notices/:id', authRequired, async (req, res) => {
   if (typeof message === 'string' && message.trim()) updates.message = message.trim()
   if (typeof type === 'string' && (type === 'general' || type === 'alert')) updates.type = type
   await noticeRef.update(updates)
+  invalidateCache('notices:active')
   const updatedSnapshot = await noticeRef.get()
   const data = updatedSnapshot.data()
   res.json({
@@ -591,6 +685,7 @@ app.post('/api/folders', authRequired, adminRequired, async (req, res) => {
   }
   const folder = { name: subject, subject, year, createdAt: FieldValue.serverTimestamp(), createdBy: req.user.id }
   const created = await db.collection('folders').add(folder)
+  invalidateCache('folders:all')
   res.status(201).json({ id: created.id, ...folder, createdAt: new Date().toISOString() })
 })
 app.patch('/api/folders/:id', authRequired, adminRequired, async (req, res) => {
@@ -611,6 +706,7 @@ app.patch('/api/folders/:id', authRequired, adminRequired, async (req, res) => {
     await batch.commit()
   }
   await folderRef.update({ name: subject, subject, year })
+  invalidateCache('folders:all', 'notes:public')
   res.json({ id: req.params.id, name: subject, subject, year })
 })
 app.delete('/api/folders/:id', authRequired, adminRequired, async (req, res) => {
@@ -629,6 +725,7 @@ app.delete('/api/folders/:id', authRequired, adminRequired, async (req, res) => 
     await batch.commit()
   }
   await folderRef.delete()
+  invalidateCache('folders:all', 'notes:public')
   res.json({ id: req.params.id, deleted: true, deletedNotes: linkedNotes.length })
 })
 app.get('/api/admin/users', authRequired, adminRequired, async (_req, res) => {
@@ -1347,6 +1444,12 @@ app.use((err, req, res, _next) => {
   if (err.message && err.message.toLowerCase().includes('cors')) {
     return res.status(403).json({ message: 'Cross-Origin Request Blocked by Security Policy' })
   }
+  if (isQuotaError(err)) {
+    return res.status(503).json({
+      message: 'Database quota limit reached. Operations will resume automatically as quotas refresh.',
+      code: 'QUOTA_EXCEEDED'
+    })
+  }
   const statusCode = err.status || err.statusCode || 500
   res.status(statusCode).json({
     message: statusCode === 500 ? 'An unexpected internal server error occurred.' : err.message,
@@ -1354,17 +1457,25 @@ app.use((err, req, res, _next) => {
 })
 
 const ensureAdmin = async () => {
-  if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) return
-  const email = process.env.ADMIN_EMAIL.toLowerCase().trim()
-  const userRef = db.collection('users').doc(Buffer.from(email).toString('base64url'))
-  const existingUser = await userRef.get()
-  if (existingUser.exists) {
-    await userRef.set({ email, role: 'admin', blocked: false, mobile: '' }, { merge: true })
-  } else {
-    const passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12)
-    await userRef.set({ email, name: process.env.ADMIN_NAME || 'Nexus Core Admin', mobile: '', passwordHash, role: 'admin', blocked: false, college: '', year: '', branch: '', createdAt: FieldValue.serverTimestamp() })
+  try {
+    if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) return
+    const email = process.env.ADMIN_EMAIL.toLowerCase().trim()
+    const userRef = db.collection('users').doc(Buffer.from(email).toString('base64url'))
+    const existingUser = await userRef.get()
+    if (existingUser.exists) {
+      await userRef.set({ email, role: 'admin', blocked: false, mobile: '' }, { merge: true })
+    } else {
+      const passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12)
+      await userRef.set({ email, name: process.env.ADMIN_NAME || 'Nexus Core Admin', mobile: '', passwordHash, role: 'admin', blocked: false, college: '', year: '', branch: '', createdAt: FieldValue.serverTimestamp() })
+    }
+    console.log(`Admin account ready for ${email}`)
+  } catch (err) {
+    if (isQuotaError(err)) {
+      console.warn('[Quota Guard] ensureAdmin deferred due to quota limit.')
+      return
+    }
+    console.warn('[ensureAdmin Warning]:', err.message)
   }
-  console.log(`Admin account ready for ${email}`)
 }
 
 const startServer = async () => {
