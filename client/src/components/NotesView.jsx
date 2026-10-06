@@ -16,7 +16,7 @@ export default function NotesView({
     (subject === 'All notes' || (selectedFolder && (note.folderId ? note.folderId === selectedFolder.id : note.subject === subject))) &&
     `${note.title} ${note.subject}`.toLowerCase().includes(search.toLowerCase())
   );
-  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 8);
+  const visibleNotes = showAllNotes ? filteredNotes : filteredNotes.slice(0, 9);
 
   return (
     <section className="page-width">
@@ -64,7 +64,7 @@ export default function NotesView({
         </div>
       )}
 
-      {filteredNotes.length > 8 && (
+      {filteredNotes.length > 9 && (
         <div className="center-row">
           <button className="button button-ghost" onClick={() => setShowAllNotes((shown) => !shown)}>
             {showAllNotes ? 'Show fewer notes' : `Show all ${filteredNotes.length} notes`}
