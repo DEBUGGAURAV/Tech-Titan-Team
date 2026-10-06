@@ -449,10 +449,10 @@ const heavyAdminLimiter = createRateLimiter({
   keyPrefix: 'admin_heavy'
 })
 
-// 4. Authentication Limiter (15 attempts per 15 min per account/IP)
+// 4. Authentication Limiter (12 attempts per 15 min)
 const authLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
-  max: 15,
+  max: 12,
   message: 'Too many sign-in attempts. Please wait 15 minutes before trying again.',
   keyPrefix: 'auth_signin',
   keyGenerator: (req) => {
@@ -461,24 +461,12 @@ const authLimiter = createRateLimiter({
   }
 })
 
-// 5. Verification OTP Dispatch Limiter (6 requests per 10 min per email/IP)
-const otpRequestLimiter = createRateLimiter({
+// 5. Verification Codes & Signup Limiter (5 requests per 10 min)
+const otpLimiter = createRateLimiter({
   windowMs: 10 * 60 * 1000,
-  max: 6,
-  message: 'Too many verification code requests for this email. Please check your inbox or wait 10 minutes.',
-  keyPrefix: 'otp_send',
-  keyGenerator: (req) => {
-    const email = req.body?.email?.trim().toLowerCase()
-    return email ? `${email}:${getClientIp(req)}` : getClientIp(req)
-  }
-})
-
-// 6. Verification OTP Submission & Signup Limiter (15 attempts per 10 min per email/IP)
-const otpVerifyLimiter = createRateLimiter({
-  windowMs: 10 * 60 * 1000,
-  max: 15,
-  message: 'Too many verification code attempts. Please wait 10 minutes before trying again.',
-  keyPrefix: 'otp_verify',
+  max: 5,
+  message: 'Too many verification code requests. Please wait 10 minutes before trying again.',
+  keyPrefix: 'auth_otp',
   keyGenerator: (req) => {
     const email = req.body?.email?.trim().toLowerCase()
     return email ? `${email}:${getClientIp(req)}` : getClientIp(req)
@@ -1459,7 +1447,7 @@ app.delete('/api/admin/collections/:name', authRequired, adminRequired, dbWriteL
   } catch (err) { res.status(500).json({ message: err.message }) }
 })
 
-app.post('/api/auth/request-otp', otpRequestLimiter, async (req, res) => {
+app.post('/api/auth/request-otp', otpLimiter, async (req, res) => {
   try {
     const { email, purpose = 'signup' } = req.body || {}
     const normalizedEmail = email?.trim().toLowerCase()
@@ -1631,7 +1619,7 @@ app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
   res.json({ message: 'Password updated. You can sign in now.' })
 })
 
-app.post('/api/auth/verify-otp', otpVerifyLimiter, async (req, res) => {
+app.post('/api/auth/verify-otp', otpLimiter, async (req, res) => {
   try {
     const { email, code, password, name, mobile, college, year, branch, course } = req.body || {}
     const normalizedEmail = email?.trim().toLowerCase()
