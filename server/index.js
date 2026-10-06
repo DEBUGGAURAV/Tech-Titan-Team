@@ -11,7 +11,6 @@ import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
 import Mailjet from 'node-mailjet'
-import nodemailer from 'nodemailer'
 import { cert, getApps, initializeApp } from 'firebase-admin/app'
 import { getFirestore, FieldValue } from 'firebase-admin/firestore'
 import * as XLSX from 'xlsx'
@@ -77,81 +76,32 @@ const mailjet = process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY
   ? Mailjet.apiConnect(process.env.MAILJET_API_KEY, process.env.MAILJET_SECRET_KEY)
   : null
 
-const createSmtpTransport = () => {
-  const gmailUser = process.env.GMAIL_USER || (process.env.SMTP_USER?.includes('@gmail.com') ? process.env.SMTP_USER : null)
-  const gmailPass = process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASS || (gmailUser ? process.env.SMTP_PASS : null)
+const sendMailjetEmail = async ({ to, subject, text, html }) => {
+  if (!mailjet || !process.env.MAILJET_SENDER_EMAIL) {
+    const errorMsg = 'Mailjet is not configured. Missing MAILJET_API_KEY, MAILJET_SECRET_KEY, or MAILJET_SENDER_EMAIL.'
+    console.warn(`[Mailjet Notice] ${errorMsg}`)
+    return { success: false, error: new Error(errorMsg) }
+  }
 
-  if (gmailUser && gmailPass) {
-    return nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: gmailUser.trim(), pass: gmailPass.replace(/\s+/g, '') },
+  try {
+    const response = await mailjet.post('send', { version: 'v3.1' }).request({
+      Messages: [{
+        From: {
+          Email: process.env.MAILJET_SENDER_EMAIL.trim(),
+          Name: 'Tech Titan Team',
+        },
+        To: [{ Email: to.trim() }],
+        Subject: subject,
+        TextPart: text,
+        HTMLPart: html,
+      }],
     })
+    console.log(`[Mailjet] Successfully delivered email to ${to}`)
+    return { success: true, response }
+  } catch (err) {
+    console.error(`[Mailjet Error] Failed to send to ${to}:`, err.statusCode || '', err.message || err)
+    return { success: false, error: err }
   }
-
-  const host = process.env.SMTP_HOST
-  const port = Number(process.env.SMTP_PORT || 587)
-  const user = process.env.SMTP_USER
-  const pass = process.env.SMTP_PASS
-
-  if (host && user && pass) {
-    return nodemailer.createTransport({
-      host: host.trim(),
-      port,
-      secure: port === 465,
-      auth: { user: user.trim(), pass: pass.trim() },
-    })
-  }
-
-  return null
-}
-
-const sendEmail = async ({ to, subject, text, html }) => {
-  let lastError = null
-
-  // 1. Try Mailjet REST API first if configured
-  if (mailjet && process.env.MAILJET_SENDER_EMAIL) {
-    try {
-      const response = await mailjet.post('send', { version: 'v3.1' }).request({
-        Messages: [{
-          From: {
-            Email: process.env.MAILJET_SENDER_EMAIL.trim(),
-            Name: 'Tech Titan Team',
-          },
-          To: [{ Email: to.trim() }],
-          Subject: subject,
-          TextPart: text,
-          HTMLPart: html,
-        }],
-      })
-      console.log(`[Mailjet] Successfully delivered email to ${to}`)
-      return { success: true, provider: 'mailjet', response }
-    } catch (err) {
-      lastError = err
-      console.warn(`[Mailjet Warning] Delivery failed to ${to}:`, err.statusCode || '', err.message || err)
-    }
-  }
-
-  // 2. Try Nodemailer / Gmail SMTP fallback
-  const smtp = createSmtpTransport()
-  if (smtp) {
-    try {
-      const sender = process.env.MAILJET_SENDER_EMAIL || process.env.GMAIL_USER || process.env.SMTP_USER || 'no-reply@techtitanteam.com'
-      const info = await smtp.sendMail({
-        from: `"Tech Titan Team" <${sender.trim()}>`,
-        to: to.trim(),
-        subject,
-        text,
-        html,
-      })
-      console.log(`[SMTP] Successfully delivered email to ${to} (MessageId: ${info.messageId})`)
-      return { success: true, provider: 'smtp', info }
-    } catch (err) {
-      lastError = err
-      console.warn(`[SMTP Warning] Delivery failed to ${to}:`, err.message || err)
-    }
-  }
-
-  return { success: false, error: lastError }
 }
 let rawFirebaseApp = null
 let rawDb = null
@@ -1548,7 +1498,7 @@ app.post('/api/auth/request-otp', otpLimiter, async (req, res) => {
     const code = String(crypto.randomInt(100000, 1000000))
     otpStore.set(normalizedEmail, { code, purpose, expires: Date.now() + 10 * 60 * 1000 })
     
-    const emailResult = await sendEmail({
+    const emailResult = await sendMailjetEmail({
       to: normalizedEmail,
       subject: '⚡ Tech Titan Team // Your Secret Access Key is ' + code,
       text: `⚡ TECH TITAN TEAM — OFFICIAL VERIFICATION CODE\n\nWelcome to Tech Titan Team.\n\nYour 6-Digit Secure Passcode is:\n===================================\n          >>> ${code} <<<\n===================================\n\n🔒 This passcode expires in exactly 10 minutes.\nFor your security, never share this code with anyone.\n\nForge ahead,\nTech Titan Team`,
@@ -1731,7 +1681,7 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
 
   console.log(`[Password Reset Generated] Link for ${normalizedEmail}: ${resetUrl}`)
 
-  const emailResult = await sendEmail({
+  const emailResult = await sendMailjetEmail({
     to: normalizedEmail,
     subject: '⚡ Tech Titan Team // Password Reset Protocol Initiated',
     text: `⚡ TECH TITAN TEAM — ACCESS RECOVERY PROTOCOL\n\nGreetings Student,\n\nA password reset transmission was authorized for your student identity.\nClick or paste the secure link below to reset your password:\n\n=======================================================\n>>> ACCESS RECOVERY LINK:\n${resetUrl}\n=======================================================\n\n⏳ Temporal Validity: Exactly 15 minutes.\n🔒 Single-Use Protocol: Once updated, this token is permanently invalidated.\n\nIf you did not initiate this request, your account credentials remain strictly safe. You can safely disregard this message.\n\n— Tech Titan Team Collective`,
@@ -1806,10 +1756,10 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   })
 
   if (!emailResult.success) {
-    console.error(`[Email Delivery Failure] Failed to send to ${normalizedEmail}:`, emailResult.error?.message || emailResult.error)
+    console.error(`[Mailjet Error] Failed to send reset email to ${normalizedEmail}:`, emailResult.error?.message || emailResult.error)
     return res.status(502).json({
-      message: 'Email delivery failed. The email service rejected the request (e.g. Mailjet API key 401 Unauthorized). The reset link was generated in server console. Please configure valid Mailjet keys or Gmail App Password in server environment.',
-      error: emailResult.error?.message || 'Mail service delivery failure',
+      message: 'Failed to send password reset email via Mailjet. Please verify your MAILJET_API_KEY, MAILJET_SECRET_KEY, and verified sender email in Render.',
+      error: emailResult.error?.message || 'Mailjet transmission error',
     })
   }
 
