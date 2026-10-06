@@ -2,18 +2,20 @@ import React, { useState, useMemo, useCallback } from 'react';
 import { 
   Download, Folder, Pencil, Search, ShieldCheck, Trash2, Users, Cpu, Clock, 
   Layers, Sparkles, Calendar, Activity, LogOut, LogIn, FileDown, 
-  ChevronDown, ChevronUp, UserCheck, Shield, Check, X, AlertCircle
+  ChevronDown, ChevronUp, UserCheck, Shield, Check, X, AlertCircle, Megaphone
 } from 'lucide-react';
 import DatabaseAdminPanel from './DatabaseAdminPanel';
 import { FolderForm, AdminNoteForm } from './UploadForms';
 import { NoteQueue } from './ContentAdmin';
+import NoticeBoard from './NoticeBoard';
 import { getAdminUserDetails, deleteUserActivityLog, deleteAllUserActivityLogs } from '../api';
 
 export default function AdminView({
   users, notes, folders, token, roleRequests = [], canApproveAdminRequests,
   onRoleRequestDecision, onExport, onCreateFolder, onCreateNote,
   onNoteStatus, onBlock, onDelete, onDeleteAll, onEditFolder,
-  onDeleteFolder, onEditNote, onDeleteNote, onUpdateUser
+  onDeleteFolder, onEditNote, onDeleteNote, onUpdateUser,
+  notices = [], onCreateNotice, onDeleteNotice, onEditNotice
 }) {
   const [userFilter, setUserFilter] = useState('');
   const [showAllUsers, setShowAllUsers] = useState(false);
@@ -233,6 +235,26 @@ export default function AdminView({
           </strong>
           <small style={{ color: '#64748b', display: 'block', marginTop: '4px' }}>Notes awaiting review</small>
         </div>
+
+        <div className="stat" style={{
+          background: 'linear-gradient(145deg, rgba(16, 35, 50, 0.7) 0%, rgba(15, 23, 42, 0.95) 100%)',
+          border: '1.5px solid rgba(56, 189, 248, 0.35)',
+          borderRadius: '18px', padding: '24px',
+          boxShadow: '0 8px 30px rgba(0,0,0,0.45), 0 0 15px rgba(56, 189, 248, 0.15)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <small style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: '800', textTransform: 'uppercase' }}>Active Notices</small>
+            <span style={{ color: '#38bdf8', background: 'rgba(56, 189, 248, 0.15)', padding: '4px', borderRadius: '8px' }}><Megaphone size={16} /></span>
+          </div>
+          <strong style={{
+            fontSize: '2.8rem',
+            background: 'linear-gradient(135deg, #38bdf8 0%, #00f2fe 100%)',
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent'
+          }}>
+            {notices.length}
+          </strong>
+          <small style={{ color: '#64748b', display: 'block', marginTop: '4px' }}>Campus broadcasts live</small>
+        </div>
       </div>
 
       {/* Upload & Create Forms */}
@@ -315,6 +337,17 @@ export default function AdminView({
         can={{ review: true, edit: true, delete: true }}
         onEditNote={onEditNote} onDeleteNote={onDeleteNote} onNoteStatus={onNoteStatus}
       />
+
+      {/* Notice Board Full Management Console */}
+      <div style={{ marginTop: '36px', marginBottom: '36px' }}>
+        <NoticeBoard
+          notices={notices}
+          canManage={true}
+          onCreateNotice={onCreateNotice}
+          onDeleteNotice={onDeleteNotice}
+          onEditNotice={onEditNotice}
+        />
+      </div>
 
       {/* User Records Management Table */}
       <div className="admin-table" style={{

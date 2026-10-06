@@ -98,7 +98,7 @@ export const createNotice = (notice, token) => {
 }
 export const updateNotice = (id, changes, token) => {
   invalidateCache('/notices');
-  return request(/notices/, { method: 'PATCH', body: JSON.stringify(changes) }, token);
+  return request(`/notices/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }, token);
 }
 export const deleteNotice = (id, token) => {
   invalidateCache('/notices');

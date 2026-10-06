@@ -482,7 +482,31 @@ function App() {
             <div id="admin">
               {isAdmin ? (
                 <>
-                  <AdminView users={adminUsers} notes={adminNotes} folders={folders} token={session.token} roleRequests={adminRoleRequests} canApproveAdminRequests={canApproveAdminRequests} onRoleRequestDecision={handleAdminRoleRequestDecision} onExport={handleExportUsers} onCreateFolder={handleCreateFolder} onCreateNote={handleAdminNote} onNoteStatus={handleNoteStatus} onEditFolder={handleEditFolder} onDeleteFolder={handleDeleteFolder} onEditNote={handleEditNote} onDeleteNote={handleDeleteNote} onUpdateUser={handleUpdateAdminUser} onDeleteAll={handleDeleteAllUsers} onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }} onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }} />
+                  <AdminView
+                    users={adminUsers}
+                    notes={adminNotes}
+                    folders={folders}
+                    token={session.token}
+                    roleRequests={adminRoleRequests}
+                    canApproveAdminRequests={canApproveAdminRequests}
+                    onRoleRequestDecision={handleAdminRoleRequestDecision}
+                    onExport={handleExportUsers}
+                    onCreateFolder={handleCreateFolder}
+                    onCreateNote={handleAdminNote}
+                    onNoteStatus={handleNoteStatus}
+                    onEditFolder={handleEditFolder}
+                    onDeleteFolder={handleDeleteFolder}
+                    onEditNote={handleEditNote}
+                    onDeleteNote={handleDeleteNote}
+                    onUpdateUser={handleUpdateAdminUser}
+                    onDeleteAll={handleDeleteAllUsers}
+                    onBlock={async (id, blocked) => { await setUserBlocked(id, blocked, session.token); setAdminUsers((users) => users.map((user) => user.id === id ? { ...user, blocked } : user)) }}
+                    onDelete={async (id) => { try { await deleteAdminUser(id, session.token); setAdminUsers((users) => users.filter((user) => user.id !== id)); setNotice('User deleted from access management.') } catch (error) { setNotice(error.message) } }}
+                    notices={noticeBoard}
+                    onCreateNotice={handleCreateNotice}
+                    onDeleteNotice={handleDeleteNotice}
+                    onEditNotice={handleEditNotice}
+                  />
                   <ContentAdminManager users={adminUsers} canApproveAdminRequests={canApproveAdminRequests} onSavePermissions={handleSetContentPermissions} />
                 </>
               ) : (
@@ -498,7 +522,7 @@ function App() {
                   : <section className="page-width access-section card"><LockKeyhole size={32} /><div><h2>Sign in to enter the library.</h2><p>Unlock premium notes and your student space.</p></div></section>}
               </div>
               <div id="students">{signedIn && <StudentsView onProfile={() => navigate('profile')} />}</div>
-              {signedIn && <NoticeBoard notices={noticeBoard} canManage={canManageContent || isAdmin} onCreateNotice={handleCreateNotice} onDeleteNotice={handleDeleteNotice} onEditNotice={handleEditNotice} />}
+              {signedIn && <NoticeBoard notices={noticeBoard} canManage={false} />}
             </>
           )}
         </Suspense></main>
