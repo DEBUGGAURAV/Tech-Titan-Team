@@ -65,45 +65,47 @@ const initFirebase = () => {
     }
   }
 
-  // 2. Try individual environment variables with fallback project ID and sanitized formatting
-  const projectId = (process.env.FIREBASE_PROJECT_ID || process.env.PROJECT_ID || 'tech-titan-team').trim().replace(/^["']|["']$/g, '')
+  // 2. Try individual environment variables (project ID is 100% automatic and never demanded)
   const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || process.env.CLIENT_EMAIL || '').trim().replace(/^["']|["']$/g, '')
   let privateKey = (process.env.FIREBASE_PRIVATE_KEY || process.env.PRIVATE_KEY || '').trim().replace(/^["']|["']$/g, '')
   if (privateKey) {
     privateKey = privateKey.replace(/\\n/g, '\n')
   }
 
-  if (projectId && clientEmail && privateKey) {
+  // Automatically derive project ID from service account email (e.g. @tech-titan-team.iam.gserviceaccount.com) or default
+  const extractedFromEmail = clientEmail.match(/@([^.]+)\.iam\.gserviceaccount\.com/i)?.[1] || ''
+  const projectId = (process.env.FIREBASE_PROJECT_ID || process.env.PROJECT_ID || extractedFromEmail || 'tech-titan-team').trim().replace(/^["']|["']$/g, '')
+
+  if (clientEmail && privateKey) {
     try {
       rawFirebaseApp = initializeApp({
         credential: cert({
-          projectId,
+          projectId: projectId || 'tech-titan-team',
           clientEmail,
           privateKey,
         }),
       })
       rawDb = getFirestore(rawFirebaseApp)
-      console.log(`[Firebase] Initialized with credentials for project: ${projectId}`)
+      console.log(`[Firebase] Initialized with credentials for project: ${projectId || 'tech-titan-team'}`)
       return true
     } catch (err) {
       console.error('[Firebase] Failed to initialize with provided credentials:', err.message)
     }
   }
 
-  // 3. Try initializeApp with project ID or Application Default Credentials
+  // 3. Try initializeApp with default project ID or Application Default Credentials
   try {
     rawFirebaseApp = initializeApp({ projectId: projectId || 'tech-titan-team' })
     rawDb = getFirestore(rawFirebaseApp)
-    console.log(`[Firebase] Initialized with application defaults for project: ${projectId}`)
+    console.log(`[Firebase] Initialized with application defaults for project: ${projectId || 'tech-titan-team'}`)
     return true
   } catch (err) {
     console.warn('[Firebase] Application Default Credentials init notice:', err.message)
   }
 
   console.error('========================================================================')
-  console.error('⚠️ [CONFIGURATION NOTICE]: Firebase Admin credentials missing or incomplete!')
-  console.error('In your Render dashboard (techtitan-api -> Environment), verify:')
-  console.error('  FIREBASE_PROJECT_ID   = tech-titan-team')
+  console.error('⚠️ [CONFIGURATION NOTICE]: Firebase credentials pending in environment!')
+  console.error('In your Render dashboard (techtitan-api -> Environment), add:')
   console.error('  FIREBASE_CLIENT_EMAIL = (your service account email)')
   console.error('  FIREBASE_PRIVATE_KEY  = (your private key starting with -----BEGIN PRIVATE KEY-----)')
   console.error('========================================================================')
