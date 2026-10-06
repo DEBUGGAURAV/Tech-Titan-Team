@@ -49,7 +49,10 @@ function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [subject, setSubject] = useState('All notes')
   const [search, setSearch] = useState('')
-  const [authOpen, setAuthOpen] = useState(() => new URLSearchParams(window.location.search).get('signup') === '1')
+  const [authOpen, setAuthOpen] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('signup') === '1' || Boolean(params.get('reset'))
+  })
   const [adminOpen, setAdminOpen] = useState(false)
   const [session, setSession] = useState(() => JSON.parse(localStorage.getItem('tech-titan-session') || 'null'))
   const [liveNotes, setLiveNotes] = useState(() => {
@@ -72,6 +75,13 @@ function App() {
   const signedIn = Boolean(session?.token)
   const isAdmin = session?.user?.role === 'admin'
   const canManageContent = hasAnyNotePermission(session?.user)
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('reset') || params.get('signup') === '1') {
+      setAuthOpen(true)
+    }
+  }, [])
 
   useEffect(() => {
     if (!session?.token) {
@@ -183,6 +193,7 @@ function App() {
   const handleAuthSuccess = (nextSession) => {
     const location = new URL(window.location.href)
     location.searchParams.delete('signup')
+    location.searchParams.delete('reset')
     window.history.replaceState({}, '', location)
     localStorage.setItem('tech-titan-session', JSON.stringify(nextSession))
     setSession(nextSession)

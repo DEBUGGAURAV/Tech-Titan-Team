@@ -141,6 +141,10 @@ export default function AuthModal({ onClose, onSuccess }) {
   const submitReset = async () => {
     setError('');
     setMessage('');
+    if (!resetToken) {
+      setError('Password reset link is missing or invalid. Please request a new link.');
+      return;
+    }
     if (!password || password.length < 8) {
       setError('A password of at least 8 characters is required.');
       return;
@@ -149,8 +153,14 @@ export default function AuthModal({ onClose, onSuccess }) {
     try {
       await resetPassword(resetToken, password);
       setMode('signin');
-      setMessage('Password updated. Sign in with your new password.');
+      setMessage('Password updated successfully! Sign in with your new password.');
       setError('');
+      setPassword('');
+      if (window.history && window.history.replaceState) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('reset');
+        window.history.replaceState({}, document.title, url.pathname + (url.search ? url.search : '') + url.hash);
+      }
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -171,10 +181,13 @@ export default function AuthModal({ onClose, onSuccess }) {
       return (
         <>
           <h2>Find your way back</h2>
-          <p>Enter your Gmail address and we'll send a reset link.</p>
+          <p>Enter your Gmail address and we'll send a secure reset link.</p>
           <label className="field">Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@gmail.com" required /></label>
           <button className="button button-block" onClick={sendReset} disabled={loading}>
             {loading ? 'Sending...' : 'Send reset link'} <Mail size={18} />
+          </button>
+          <button type="button" className="ghost-button" style={{ marginTop: 12, width: '100%', justifyContent: 'center' }} onClick={() => changeMode('signin')}>
+            Back to Sign in
           </button>
         </>
       );
@@ -183,10 +196,29 @@ export default function AuthModal({ onClose, onSuccess }) {
       return (
         <>
           <h2>Set a fresh start</h2>
-          <label className="field">New password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 8 characters" required /></label>
-          <button className="button button-block" onClick={submitReset} disabled={loading}>
-            {loading ? 'Updating...' : 'Update password'} <ArrowUpRight size={18} />
-          </button>
+          {resetToken ? (
+            <>
+              <p style={{ color: '#94a3b8', fontSize: '14px', marginBottom: '14px' }}>
+                Enter your new secure password below (minimum 8 characters).
+              </p>
+              <label className="field">New password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 8 characters" required /></label>
+              <button className="button button-block" onClick={submitReset} disabled={loading}>
+                {loading ? 'Updating...' : 'Update password'} <ArrowUpRight size={18} />
+              </button>
+              <button type="button" className="ghost-button" style={{ marginTop: 12, width: '100%', justifyContent: 'center' }} onClick={() => changeMode('signin')}>
+                Back to Sign in
+              </button>
+            </>
+          ) : (
+            <>
+              <p style={{ color: '#f87171', fontSize: '14px', marginBottom: '16px' }}>
+                No reset token detected in link. Please request a new recovery link.
+              </p>
+              <button className="button button-block" onClick={() => changeMode('forgot')}>
+                Request new reset link <Mail size={18} />
+              </button>
+            </>
+          )}
         </>
       );
     }
