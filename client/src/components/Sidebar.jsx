@@ -26,6 +26,17 @@ export default function Sidebar({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [mobileNavOpen, setMobileNavOpen]);
 
+  // Prevent background page from moving up and down when mobile sidebar is open
+  useEffect(() => {
+    if (mobileNavOpen) {
+      const originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = originalOverflow;
+      };
+    }
+  }, [mobileNavOpen]);
+
   const handleNavClick = (key) => {
     setView(key);
     setMobileNavOpen(false);
