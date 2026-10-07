@@ -164,7 +164,7 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
     });
   }, [notices, filterType, searchQuery]);
 
-  const visibleNotices = showAll ? filteredNotices : filteredNotices.slice(0, 6);
+  const visibleNotices = showAll ? filteredNotices : filteredNotices.slice(0, 3);
 
   const alertCount = useMemo(() => notices.filter(n => n.type === 'alert').length, [notices]);
   const generalCount = notices.length - alertCount;
@@ -1276,7 +1276,7 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
       </div>
 
       {/* ===== PAGINATION / EXPAND TOGGLE ===== */}
-      {filteredNotices.length > 6 && (
+      {filteredNotices.length > 3 && (
         <div style={{ textAlign: 'center', marginTop: '34px' }}>
           <button
             onClick={() => setShowAll((prev) => !prev)}
@@ -1296,7 +1296,7 @@ export default function NoticeBoard({ notices = [], canManage, onCreateNotice, o
               transition: 'all 0.18s ease'
             }}
           >
-            {showAll ? 'Show Latest 6 Broadcasts' : `Show All ${filteredNotices.length} Signals`}
+            {showAll ? 'Show Latest 3 Broadcasts' : `Show All ${filteredNotices.length} Signals`}
           </button>
         </div>
       )}
