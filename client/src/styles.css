@@ -284,16 +284,82 @@ select option { background: var(--surface); color: var(--text-primary); }
 .main-content-wrapper {
   flex: 1;
   min-width: 0;
-  margin-left: var(--sidebar-w);
-  width: calc(100% - var(--sidebar-w));
+  margin-left: 0;
+  width: 100%;
   min-height: 100vh;
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  transition: margin-left .22s cubic-bezier(0.16, 1, 0.3, 1), width .22s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow-x: hidden;
+  overflow-y: visible;
+  transition: margin-left .28s cubic-bezier(0.16, 1, 0.3, 1), width .28s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.mobile-header { display: none; }
+@media (min-width: 1025px) {
+  .main-content-wrapper.sidebar-active {
+    margin-left: var(--sidebar-w);
+    width: calc(100% - var(--sidebar-w));
+  }
+}
+
+/* App Universal Topbar (available on all devices) */
+.app-topbar {
+  display: flex;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background: rgba(11, 17, 32, 0.95);
+  border-bottom: 1px solid var(--border-bright);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-sizing: border-box;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar-brand-text {
+  font-size: 1.15rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, #00f2fe 0%, #38bdf8 50%, #c084fc 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.menu-toggle-btn {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1.5px solid var(--border-bright);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  transition: all .18s ease;
+  cursor: pointer;
+}
+.menu-toggle-btn:hover {
+  border-color: var(--cyan);
+  background: var(--cyan-dim);
+  color: var(--cyan);
+  box-shadow: 0 0 14px rgba(0, 242, 254, 0.35);
+}
 
 .sidebar {
   position: fixed;
@@ -304,22 +370,58 @@ select option { background: var(--surface); color: var(--text-primary); }
   height: 100vh;
   height: 100dvh;
   max-height: 100dvh;
-  z-index: 200;
+  z-index: 999;
   display: flex;
   flex-direction: column;
   padding: 24px 16px 20px 42px;
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.96) 0%, rgba(11, 17, 32, 0.99) 100%);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98) 0%, rgba(11, 17, 32, 0.99) 100%);
   border-right: 1px solid var(--border-bright);
   color: var(--text-primary);
   box-sizing: border-box;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  transition: transform .28s cubic-bezier(0.16, 1, 0.3, 1), width .22s cubic-bezier(0.16, 1, 0.3, 1);
+  transform: translateX(-100%);
+  transition: transform .28s cubic-bezier(0.16, 1, 0.3, 1), box-shadow .28s ease;
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 242, 254, 0.25) transparent;
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
+  box-shadow: none;
+}
+
+.sidebar.is-open,
+.sidebar.mobile-open {
+  transform: translateX(0);
+  box-shadow: 16px 0 50px rgba(0, 0, 0, 0.85);
+}
+
+@media (min-width: 1025px) {
+  .sidebar.is-open,
+  .sidebar.mobile-open {
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.45);
+  }
+}
+
+.sidebar-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all .2s ease;
+  flex-shrink: 0;
+}
+.sidebar-close-btn:hover {
+  background: rgba(0, 242, 254, 0.2);
+  border-color: var(--cyan);
+  color: var(--cyan);
+  transform: scale(1.05);
 }
 
 .sidebar::-webkit-scrollbar {
@@ -1222,11 +1324,7 @@ select option { background: var(--surface); color: var(--text-primary); }
 
 /* ===== MOBILE HEADER & BACKDROP ===== */
 .mobile-header {
-  display: none; position: sticky; top: 0; z-index: 100;
-  align-items: center; justify-content: space-between; padding: 12px 18px;
-  background: rgba(15, 23, 42, 0.95);
-  border-bottom: 1px solid var(--border-bright);
-  backdrop-filter: blur(16px);
+  display: none;
 }
 
 .sidebar-backdrop {
@@ -1234,8 +1332,15 @@ select option { background: var(--surface); color: var(--text-primary); }
   inset: 0;
   background: rgba(0, 0, 0, 0.75);
   backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   z-index: 899;
   animation: fadeIn 0.2s ease;
+}
+
+@media (min-width: 1025px) {
+  .sidebar-backdrop {
+    display: none !important;
+  }
 }
 
 @keyframes fadeIn {
@@ -1259,7 +1364,7 @@ select option { background: var(--surface); color: var(--text-primary); }
     height: 100vh;
     height: 100dvh;
     max-height: 100dvh;
-    z-index: 999;
+    z-index: 1000;
     width: min(85vw, 300px);
     transform: translateX(-100%);
     box-shadow: none;
@@ -1267,12 +1372,13 @@ select option { background: var(--surface); color: var(--text-primary); }
     overflow-y: auto;
     overscroll-behavior: contain;
   }
+  .sidebar.is-open,
   .sidebar.mobile-open {
     transform: translateX(0);
     box-shadow: 20px 0 60px rgba(0, 0, 0, 0.85);
   }
-  .mobile-header {
-    display: flex;
+  .app-topbar {
+    padding: 10px 16px;
   }
   .hero {
     grid-template-columns: 1fr;
@@ -1423,19 +1529,12 @@ select option { background: var(--surface); color: var(--text-primary); }
     -webkit-backdrop-filter: none !important;
   }
 
-  /* 4. Hardware-accelerated smooth scrolling */
+  /* 4. Natural momentum touch scrolling for mobile */
   .main-content-wrapper,
   .main-content,
   .page-width,
   .notes-grid {
     -webkit-overflow-scrolling: touch;
-    transform: translateZ(0);
-  }
-
-  /* 5. Virtualized off-screen rendering: phone browser skips off-screen sections until scrolled */
-  #home, #notes, #students, .creative-upload-space {
-    content-visibility: auto;
-    contain-intrinsic-size: 1px 350px;
   }
 
   /* 6. Hardware-promote ticker marquee */

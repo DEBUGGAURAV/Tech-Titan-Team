@@ -5,9 +5,12 @@ import {
 } from 'lucide-react';
 
 export default function Sidebar({
-  mobileNavOpen, setMobileNavOpen, view, setView, canManageContent,
+  sidebarOpen, setSidebarOpen, mobileNavOpen, setMobileNavOpen, view, setView, canManageContent,
   signedIn, session, handleSignOut, navigate, scrollTo, setAuthOpen
 }) {
+  const isOpen = sidebarOpen !== undefined ? sidebarOpen : Boolean(mobileNavOpen);
+  const setIsOpen = setSidebarOpen || setMobileNavOpen;
+
   const items = [
     ['home', 'Home', LayoutDashboard],
     ['notices', 'Notice Board', Megaphone],
@@ -19,28 +22,19 @@ export default function Sidebar({
   // Auto-close on ESC key
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape' && mobileNavOpen) {
-        setMobileNavOpen(false);
+      if (e.key === 'Escape' && isOpen) {
+        setIsOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [mobileNavOpen, setMobileNavOpen]);
-
-  // Prevent background page from moving up and down when mobile sidebar is open
-  useEffect(() => {
-    if (mobileNavOpen) {
-      const originalOverflow = document.body.style.overflow;
-      document.body.style.overflow = 'hidden';
-      return () => {
-        document.body.style.overflow = originalOverflow;
-      };
-    }
-  }, [mobileNavOpen]);
+  }, [isOpen, setIsOpen]);
 
   const handleNavClick = (key) => {
     setView(key);
-    setMobileNavOpen(false);
+    if (window.innerWidth <= 1024) {
+      setIsOpen(false);
+    }
     setTimeout(() => {
       if (key === 'home') window.scrollTo({ top: 0, behavior: 'smooth' });
       else scrollTo(key);
@@ -49,16 +43,16 @@ export default function Sidebar({
 
   const handleProfileClick = () => {
     navigate('profile');
-    setMobileNavOpen(false);
+    if (window.innerWidth <= 1024) setIsOpen(false);
   };
 
   const handleSignOutClick = () => {
-    setMobileNavOpen(false);
+    if (window.innerWidth <= 1024) setIsOpen(false);
     handleSignOut();
   };
 
   const handleSignInClick = () => {
-    setMobileNavOpen(false);
+    if (window.innerWidth <= 1024) setIsOpen(false);
     setAuthOpen(true);
   };
 
@@ -67,13 +61,13 @@ export default function Sidebar({
   const roleName = user?.role === 'admin' ? 'Administrator' : user?.role === 'content_admin' ? 'Content Admin' : 'Verified Student';
 
   return (
-    <aside className={`sidebar ${mobileNavOpen ? 'mobile-open' : ''}`}>
+    <aside className={`sidebar ${isOpen ? 'is-open mobile-open' : ''}`}>
       <div className="sidebar-top">
         <button 
           className="brand" 
           onClick={() => {
             setView('home');
-            setMobileNavOpen(false);
+            if (window.innerWidth <= 1024) setIsOpen(false);
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }} 
           aria-label="Go to home"
@@ -81,26 +75,14 @@ export default function Sidebar({
           <span className="brand-mark"><Zap size={20} fill="currentColor" /></span>
           <span>Tech <i>Titan</i></span>
         </button>
-        {mobileNavOpen && (
-          <button 
-            className="mobile-close-btn"
-            onClick={() => setMobileNavOpen(false)} 
-            aria-label="Close menu"
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: '36px',
-              height: '36px',
-              borderRadius: '10px',
-              background: 'rgba(255, 255, 255, 0.08)',
-              border: '1px solid rgba(255, 255, 255, 0.15)',
-              color: '#f8fafc'
-            }}
-          >
-            <X size={20} />
-          </button>
-        )}
+        <button 
+          className="sidebar-close-btn"
+          onClick={() => setIsOpen(false)} 
+          aria-label="Close sidebar"
+          title="Close sidebar"
+        >
+          <X size={20} />
+        </button>
       </div>
 
       <nav className="sidebar-nav" aria-label="Primary navigation">

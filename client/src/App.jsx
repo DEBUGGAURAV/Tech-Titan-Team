@@ -1,6 +1,6 @@
 import React, { useEffect, useState, Suspense, lazy } from 'react'
 import {
-  ArrowUpRight, Clock3, FileText, LockKeyhole, Menu, X, Bell,
+  ArrowUpRight, Clock3, FileText, LockKeyhole, Menu, X, Bell, Zap,
 } from 'lucide-react'
 import {
   createFolder, createNote, createNotice, deleteAdminUser,
@@ -46,7 +46,12 @@ const userMatchesQuery = (user, query) => {
 
 function App() {
   const [view, setView] = useState('home')
-  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return window.innerWidth > 1024
+    }
+    return false
+  })
   const [subject, setSubject] = useState('All notes')
   const [search, setSearch] = useState('')
   const [authOpen, setAuthOpen] = useState(() => {
@@ -413,28 +418,30 @@ function App() {
   }, [signedIn]);
 
 
-  // Lock body scroll when mobile navigation drawer is active
+  // Lock body scroll ONLY on mobile drawer (screen <= 1024px) when open
   useEffect(() => {
-    if (mobileNavOpen) {
+    if (sidebarOpen && typeof window !== 'undefined' && window.innerWidth <= 1024) {
       document.body.style.overflow = 'hidden'
+      return () => { document.body.style.overflow = '' }
     } else {
       document.body.style.overflow = ''
     }
-    return () => { document.body.style.overflow = '' }
-  }, [mobileNavOpen])
+  }, [sidebarOpen])
 
   return (
-    <div className="app-shell dashboard-layout">
-      {mobileNavOpen && (
+    <div className={`app-shell dashboard-layout ${sidebarOpen ? 'sidebar-active' : 'sidebar-collapsed'}`}>
+      {sidebarOpen && (
         <div
           className="sidebar-backdrop"
-          onClick={() => setMobileNavOpen(false)}
+          onClick={() => setSidebarOpen(false)}
           aria-hidden="true"
         />
       )}
       <Sidebar
-        mobileNavOpen={mobileNavOpen}
-        setMobileNavOpen={setMobileNavOpen}
+        sidebarOpen={sidebarOpen}
+        setSidebarOpen={setSidebarOpen}
+        mobileNavOpen={sidebarOpen}
+        setMobileNavOpen={setSidebarOpen}
         view={view}
         setView={setView}
         canManageContent={canManageContent}
@@ -446,44 +453,59 @@ function App() {
         setAuthOpen={setAuthOpen}
       />
 
-      <div className="main-content-wrapper">
-        <header className="mobile-header">
-          <button className="icon-button" aria-label="Open menu" onClick={() => setMobileNavOpen(true)}><Menu size={22} /></button>
-          <span 
-            className="mobile-brand-text"
-            onClick={() => {
-              setView('home')
-              setMobileNavOpen(false)
-              window.scrollTo({ top: 0, behavior: 'smooth' })
-            }}
-            style={{ cursor: 'pointer' }}
-          >
-            Tech <i>Titan</i>
-          </span>
-          {signedIn ? (
-            <button 
-              className="avatar-circle small" 
-              aria-label="Profile and account settings" 
+      <div className={`main-content-wrapper ${sidebarOpen ? 'sidebar-active' : 'sidebar-collapsed'}`}>
+        <header className="app-topbar">
+          <div className="topbar-left">
+            {!sidebarOpen && (
+              <button 
+                className="icon-button menu-toggle-btn" 
+                aria-label="Open sidebar menu" 
+                onClick={() => setSidebarOpen(true)}
+                title="Open sidebar"
+              >
+                <Menu size={22} />
+              </button>
+            )}
+            <span 
+              className="topbar-brand-text"
               onClick={() => {
-                navigate('profile')
-                setMobileNavOpen(false)
+                setView('home')
+                if (window.innerWidth <= 1024) setSidebarOpen(false)
+                window.scrollTo({ top: 0, behavior: 'smooth' })
               }}
-              title="Edit profile & account details"
+              style={{ cursor: 'pointer' }}
             >
-              {session.user?.name?.slice(0, 2).toUpperCase() || 'TT'}
-            </button>
-          ) : (
-            <button 
-              className="button button-ghost compact-button" 
-              onClick={() => {
-                setAuthOpen(true)
-                setMobileNavOpen(false)
-              }}
-              style={{ fontSize: '0.8rem', padding: '6px 14px' }}
-            >
-              Sign in
-            </button>
-          )}
+              <span className="brand-mark"><Zap size={18} fill="currentColor" /></span>
+              <span>Tech <i>Titan</i></span>
+            </span>
+          </div>
+
+          <div className="topbar-right">
+            {signedIn ? (
+              <button 
+                className="avatar-circle small" 
+                aria-label="Profile and account settings" 
+                onClick={() => {
+                  navigate('profile')
+                  if (window.innerWidth <= 1024) setSidebarOpen(false)
+                }}
+                title="Edit profile & account details"
+              >
+                {session.user?.name?.slice(0, 2).toUpperCase() || 'TT'}
+              </button>
+            ) : (
+              <button 
+                className="button button-ghost compact-button" 
+                onClick={() => {
+                  setAuthOpen(true)
+                  if (window.innerWidth <= 1024) setSidebarOpen(false)
+                }}
+                style={{ fontSize: '0.8rem', padding: '6px 14px' }}
+              >
+                Sign in
+              </button>
+            )}
+          </div>
         </header>
 
         <main className="main-content"><Suspense fallback={<div className="loading-skeleton">Loading view...</div>}>
@@ -526,12 +548,7 @@ function App() {
             </div>
           ) : (
             <>
-              {signedIn && (
-                <div id="notices" style={{ paddingTop: '8px' }}>
-                  <NoticeBoard notices={noticeBoard} canManage={false} />
-                </div>
-              )}
-              <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} /></div>
+              <div id="home"><Home onExplore={() => scrollTo('notes')} onSignIn={() => setAuthOpen(true)} signedIn={signedIn} noticeBoard={noticeBoard} /></div>
               <div id="notes">
                 {signedIn
                   ? <NotesView subject={subject} setSubject={setSubject} search={search} setSearch={setSearch} studentYear={session.user?.year} folders={folders} notes={liveNotes} latestUploads={liveNotes.slice(0, 8)} newUploadCount={newUploadCount} onDismissNewUploads={() => setNewUploadCount(0)} connectionError={connectionError} onRetry={() => setConnectionAttempt((attempt) => attempt + 1)} onNoteAccess={handleNoteAccess} />
@@ -576,7 +593,7 @@ function App() {
   )
 }
 
-function Home({ onExplore, onSignIn, signedIn }) {
+function Home({ onExplore, onSignIn, signedIn, noticeBoard = [] }) {
   // Parallax: the desk items drift slightly with the pointer (only for precise mouse devices, skipped on touchscreens)
   useEffect(() => {
     // Only run on desktop with a real mouse pointer
@@ -644,6 +661,12 @@ function Home({ onExplore, onSignIn, signedIn }) {
         <div className="pillar"><b>Made to move with you</b><small>from first year to first job</small></div>
       </div>
     </section>
+
+    {signedIn && (
+      <div id="notices" style={{ paddingTop: '16px' }}>
+        <NoticeBoard notices={noticeBoard} canManage={false} />
+      </div>
+    )}
 
     <section className="page-width" style={{ paddingTop: 0 }}>
       <div className="section-head">
