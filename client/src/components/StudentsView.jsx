@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ArrowUpRight, Award, Sparkles, Users, Zap } from 'lucide-react';
 
 const students = [
@@ -11,6 +11,9 @@ const students = [
 ];
 
 export default function StudentsView({ onProfile }) {
+  const [showAll, setShowAll] = useState(false);
+  const visibleStudents = showAll ? students : students.slice(0, 3);
+
   return (
     <section className="page-width">
       <header className="view-head">
@@ -42,7 +45,7 @@ export default function StudentsView({ onProfile }) {
       </header>
 
       <div className="people-grid">
-        {students.map((student) => (
+        {visibleStudents.map((student) => (
           <article key={student.name} className={`person-card tone-${student.color}`} style={{
             background: 'linear-gradient(145deg, rgba(20, 30, 52, 0.9) 0%, rgba(15, 23, 42, 0.96) 100%)',
             border: '1.5px solid rgba(255, 255, 255, 0.14)',
@@ -107,6 +110,31 @@ export default function StudentsView({ onProfile }) {
           </article>
         ))}
       </div>
+
+      {students.length > 3 && (
+        <div style={{ textAlign: 'center', marginTop: '36px' }}>
+          <button
+            onClick={() => setShowAll((prev) => !prev)}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '12px 32px',
+              borderRadius: '50px',
+              background: 'linear-gradient(135deg, rgba(0, 242, 254, 0.18) 0%, rgba(56, 189, 248, 0.12) 100%)',
+              border: '1.5px solid rgba(0, 242, 254, 0.5)',
+              color: '#00f2fe',
+              fontWeight: '800',
+              fontSize: '0.92rem',
+              cursor: 'pointer',
+              boxShadow: '0 0 25px rgba(0, 242, 254, 0.25)',
+              transition: 'all 0.18s ease'
+            }}
+          >
+            {showAll ? 'Show Latest 3 Peers' : `Show All ${students.length} Peers`}
+          </button>
+        </div>
+      )}
     </section>
   );
 }
