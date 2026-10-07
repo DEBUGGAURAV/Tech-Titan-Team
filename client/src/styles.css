@@ -1123,34 +1123,86 @@ select option { background: var(--surface); color: var(--text-primary); }
   transform: rotate(1deg);
 }
 .stat-note strong { font-size: 2.2rem; letter-spacing: -.04em; line-height: 1; color: var(--cyan); }
-.people-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 28px; }
+.people-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 28px;
+  width: 100%;
+}
 .tone-coral  { --tone: linear-gradient(135deg, rgba(244, 63, 94, 0.25) 0%, rgba(251, 113, 133, 0.15) 100%); }
 .tone-blue   { --tone: linear-gradient(135deg, rgba(0, 242, 254, 0.25) 0%, rgba(56, 189, 248, 0.15) 100%); }
 .tone-yellow { --tone: linear-gradient(135deg, rgba(245, 158, 11, 0.25) 0%, rgba(250, 204, 21, 0.15) 100%); }
 
 .person-card {
-  display: flex; flex-direction: column; overflow: hidden;
-  background: linear-gradient(145deg, rgba(20, 30, 52, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%);
-  border: 1px solid var(--border-bright);
-  border-radius: 18px; box-shadow: var(--shadow-sm);
-  transition: transform .2s ease, box-shadow .2s ease;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: linear-gradient(145deg, rgba(20, 30, 52, 0.9) 0%, rgba(15, 23, 42, 0.96) 100%);
+  border: 1.5px solid var(--border-bright);
+  border-radius: 22px;
+  box-shadow: var(--shadow-sm);
+  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+  min-height: 280px;
 }
-.person-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-md); border-color: rgba(0, 242, 254, 0.35); }
+.person-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6), 0 0 25px rgba(0, 242, 254, 0.2);
+  border-color: rgba(0, 242, 254, 0.5);
+}
 .person-top {
-  display: flex; align-items: flex-end; justify-content: space-between;
-  padding: 22px 22px 0; height: 96px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 24px 26px 0;
+  height: 110px;
   background: var(--tone, rgba(255, 255, 255, 0.08));
   border-bottom: 1px solid var(--border-bright);
 }
-.person-top .avatar-circle { width: 64px; height: 64px; margin-bottom: -22px; font-size: 1.25rem; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4); }
-.person-body { padding: 34px 22px 22px; display: flex; flex-direction: column; flex: 1; }
-.person-body h3 { font-size: 1.45rem; color: var(--text-primary); }
-.person-body p { color: var(--text-secondary); margin-bottom: 22px; font-size: .95rem; }
-.person-foot {
-  display: flex; justify-content: space-between; align-items: center; margin-top: auto;
-  padding-top: 16px; border-top: 1px solid var(--border-bright);
+.person-top .avatar-circle {
+  width: 72px;
+  height: 72px;
+  margin-bottom: -26px;
+  font-size: 1.45rem;
+  font-weight: 900;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5), 0 0 18px rgba(0, 242, 254, 0.4);
+  border: 2.5px solid rgba(0, 242, 254, 0.65);
 }
-.link-btn { display: inline-flex; align-items: center; gap: 4px; font-weight: 800; color: var(--cyan); text-decoration: underline; text-underline-offset: 4px; }
+.person-body {
+  padding: 38px 26px 26px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+.person-body h3 {
+  font-size: clamp(1.4rem, 1.8vw, 1.7rem);
+  font-weight: 800;
+  color: var(--text-primary);
+  margin: 0;
+}
+.person-body p {
+  color: var(--text-secondary);
+  margin: 6px 0 24px;
+  font-size: 1.02rem;
+  line-height: 1.5;
+}
+.person-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-bright);
+}
+.link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 800;
+  font-size: 1.02rem;
+  color: var(--cyan);
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
 
 /* ===== NOTICES ===== */
 .notice-list { display: grid; gap: 22px; }
@@ -1401,6 +1453,10 @@ select option { background: var(--surface); color: var(--text-primary); }
 @media (max-width: 768px) {
   .page-width {
     padding: 32px 20px;
+  }
+  .people-grid {
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
   }
   .stat-grid {
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
