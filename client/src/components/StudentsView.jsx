@@ -5,6 +5,9 @@ const students = [
   { name: 'Aarav Mehta', branch: 'Computer Science', year: '3rd year', initials: 'AM', score: '92%', color: 'coral', tag: 'Top Contributor' },
   { name: 'Meera Iyer', branch: 'Information Technology', year: '2nd year', initials: 'MI', score: '88%', color: 'blue', tag: 'Study Lead' },
   { name: 'Kabir Shah', branch: 'Computer Science', year: '4th year', initials: 'KS', score: '95%', color: 'yellow', tag: 'Resource Archon' },
+  { name: 'Priya Sharma', branch: 'Artificial Intelligence', year: '3rd year', initials: 'PS', score: '94%', color: 'coral', tag: 'Core Mentor' },
+  { name: 'Rohan Verma', branch: 'Data Science', year: '2nd year', initials: 'RV', score: '89%', color: 'blue', tag: 'Lab Captain' },
+  { name: 'Ananya Sen', branch: 'Cyber Security', year: '4th year', initials: 'AS', score: '97%', color: 'yellow', tag: 'Code Master' },
 ];
 
 export default function StudentsView({ onProfile }) {
